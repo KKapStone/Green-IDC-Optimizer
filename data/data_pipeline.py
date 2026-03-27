@@ -101,21 +101,29 @@ class Weather:
         df["outdoor_wind_speed"] = df["outdoor_wind_speed"].clip(0, None)
         return df
 
+    def resample_5min(self, df):
+        """시간 단위 데이터를 5분 간격으로 선형 보간"""
+        df = df.set_index("timestamp")
+        df_5min = df.resample("5min").interpolate(method="linear")
+        df_5min = df_5min.reset_index()
+        return df_5min
+
     def out_file(self):
         df_final = pd.concat(self.fin_list, ignore_index=True)
+        df_final = self.resample_5min(df_final)
 
         df_final.to_parquet("processed/weather.parquet", index=False)
         print("저장 완료! →  processed/weather.parquet")
         df_final.to_csv("processed/weather.csv", index=False)
         print("저장 완료! →  processed/weather.csv")
 
+        print(df_final.head())
+        print(df_final.tail())
         print(df_final.dtypes)
 
         # 잘 저장됐는지 확인
         df_check = pd.read_parquet("processed/weather.parquet")
-        df_check2 = pd.read_csv("processed/weather.csv")
         print(f"불러오기 확인: {df_check.shape}")
-        df_check.head()
         return df_final
 
     def generate_dataset(self):
@@ -222,13 +230,14 @@ class SyntheticIDCBuilder:
         P_max = spec_data["p_max_w"].mean() # spec 데이터의 평균으로 계산
         
         hourly_workload_pattern = self.load_workload_pattern() #Google Cluster 시간대별 사용량
-        weather_data = self.load_weather_data(2024, 101) #2024년 춘천 (시간 단위)
-        
+        weather_data = self.load_weather_data(2024, 101) #2024년 춘천 (5분 단위로 보간됨)
+        weather_data = weather_data.set_index("timestamp").reindex(timestamps).interpolate(method="linear").reset_index()
+
         data = {
             'timestamp': timestamps,
             'cpu_utilization': np.random.uniform(0.3, 0.8, self.time_steps),
-            'outside_temp': np.random.uniform(5, 35, self.time_steps),
-            'outside_humidity': np.random.uniform(30, 80, self.time_steps),
+            'outside_temp': weather_data["outdoor_temp_c"].values,
+            'outside_humidity': weather_data["outdoor_humidity"].values,
         }
         
         df = pd.DataFrame(data)
@@ -243,10 +252,18 @@ class SyntheticIDCBuilder:
         )
         df['pue'] = (df['it_power_kw'] + df['chiller_power_kw']) / df['it_power_kw']
         df['free_cooling_available'] = df['outside_temp'] < 15
-        
+
+        # 냉방도일 (Cooling Degree Days) — 기준온도 18°C
+        BASE_TEMP = 18
+        daily_avg_temp = df.groupby(df['timestamp'].dt.date)['outside_temp'].transform('mean')
+        df['cooling_degree_days'] = (daily_avg_temp - BASE_TEMP).clip(lower=0)
+
         return df
 
 # 사용 예시
 builder = SyntheticIDCBuilder(num_servers=500, days=90)
 dataset = builder.generate_dataset()
+print(dataset.head())
+print(dataset.tail())
+print(dataset.dtypes)
 dataset.to_parquet('processed/synthetic_idc_90days.parquet')
