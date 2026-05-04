@@ -19,12 +19,13 @@ from gymnasium import spaces
 
 from core.config.constants import (
     M_AIR_DESIGN_KG_S,
+    M_AIR_MAX_KG_S,
+    MIN_DELTA_T_C,
     T_SUPPLY_DESIGN_C,
     WORKLOAD_PROFILE,
-    FAN_POWER_RATIO_FREE,
-    FAN_POWER_RATIO_CHILLER,
+    FAN_POWER_DESIGN_KW,
+    FAN_AFFINITY_EXP,
 )
-from core.config.enums import CoolingMode
 from domain.thermodynamics.chiller import calculate_chiller_power_kw
 from domain.thermodynamics.it_power import calculate_total_it_power_kw
 from domain.thermodynamics.pue import calculate_pue
@@ -44,7 +45,7 @@ T_ZONE_LOWER = 18.0
 
 # 공급 온도 제어 범위
 T_SUPPLY_MIN = 20.0
-T_SUPPLY_MAX = 24.0
+T_SUPPLY_MAX = 26.0
 
 # 에피소드 길이
 EPISODE_STEPS = 288  # 1일 (5분 × 288)
@@ -142,21 +143,22 @@ class IDCEnv(gym.Env):
         cpu_util = float(row[2])
         it_power_kw = self._compute_it_power(cpu_util)
 
-        # 냉각 용량 계산
+        # 냉각 용량 계산 (가변 풍량 모델: CRAH가 부하에 맞춰 풍량 조절)
+        # supply ↑ → ΔT ↓ → 풍량 ↑ → 팬 전력 ↑↑↑ (affinity law)
         t_return = self._zone_temp + 2.0
-        cooling_capacity_kw = M_AIR_DESIGN_KG_S * C_P_KJ_PER_KG_K * max(0.0, t_return - self._supply_temp)
-        actual_cooling_kw = min(cooling_capacity_kw, it_power_kw)
+        delta_t = max(MIN_DELTA_T_C, t_return - self._supply_temp)
+        m_air_required = it_power_kw / (C_P_KJ_PER_KG_K * delta_t)
+        m_air_actual = min(m_air_required, M_AIR_MAX_KG_S)
+        actual_cooling_kw = m_air_actual * C_P_KJ_PER_KG_K * delta_t
 
         # 서버실 온도 변화
         excess_heat_kw = it_power_kw - actual_cooling_kw
         self._zone_temp = float(np.clip(self._zone_temp + excess_heat_kw * TIMESTEP_SEC / C_EFF_KJ_PER_K, 5.0, 50.0))
 
-        # 칠러 + 팬 전력
+        # 칠러 + 팬 전력 (팬: Affinity Law, P_fan ∝ (m_air / m_design)^FAN_AFFINITY_EXP)
         chiller_result = calculate_chiller_power_kw(actual_cooling_kw, outdoor_temp, self._supply_temp)
-        if chiller_result.cooling_mode == CoolingMode.FREE_COOLING:
-            fan_power_kw = actual_cooling_kw * FAN_POWER_RATIO_FREE
-        else:
-            fan_power_kw = actual_cooling_kw * FAN_POWER_RATIO_CHILLER
+        fan_ratio = m_air_actual / M_AIR_DESIGN_KG_S
+        fan_power_kw = FAN_POWER_DESIGN_KW * (fan_ratio ** FAN_AFFINITY_EXP)
         pue_result = calculate_pue(it_power_kw, chiller_result.chiller_power_kw + fan_power_kw)
 
         # 보상
