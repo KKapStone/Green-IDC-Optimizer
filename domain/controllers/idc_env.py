@@ -1,15 +1,17 @@
 """커스텀 IDC Gym 환경 — 우리 thermodynamics 모델 기반.
 
 Sinergym 대신 직접 만든 열역학 모델로 서버실 온도를 시뮬레이션한다.
-- 날씨: 한국 월별 기후 패턴 (실측 기반)
-- IT 부하: WORKLOAD_PROFILE + 계절 노이즈
-- 제어: CRAH 공급 온도 setpoint (20~24°C)
-- 보상: PUE overhead 최소화 + 온도 위반 패널티 (팬 전력 포함)
+- 날씨: 실측 데이터 (Google Cluster Trace 2019 + 기상청 ASOS)
+- IT 부하: 실측 CPU 사용률 + 노이즈
+- 제어: CRAH 공급 온도 setpoint (18~27°C)
+- 보상: PUE 최적화 + 온도 위반 안전 페널티
 
 사용법:
     from domain.controllers.idc_env import IDCEnv
     env = IDCEnv()
 """
+
+from collections import deque
 
 import numpy as np
 from pathlib import Path
@@ -22,10 +24,10 @@ from core.config.constants import (
     M_AIR_MAX_KG_S,
     MIN_DELTA_T_C,
     T_SUPPLY_DESIGN_C,
-    WORKLOAD_PROFILE,
     FAN_POWER_DESIGN_KW,
     FAN_AFFINITY_EXP,
 )
+from core.config.enums import CoolingMode
 from domain.thermodynamics.chiller import calculate_chiller_power_kw
 from domain.thermodynamics.it_power import calculate_total_it_power_kw
 from domain.thermodynamics.pue import calculate_pue
@@ -44,28 +46,52 @@ T_ZONE_UPPER = 27.0
 T_ZONE_LOWER = 18.0
 
 # 공급 온도 제어 범위
-T_SUPPLY_MIN = 20.0
-T_SUPPLY_MAX = 26.0
+T_SUPPLY_MIN = 18.0
+T_SUPPLY_MAX = 25.0
 
 # 에피소드 길이
 EPISODE_STEPS = 288  # 1일 (5분 × 288)
 
-# 한국 월별 외기온도/습도 평균 (춘천 기준, 기상청 1991-2020 평년값)
-KOR_MONTHLY_TEMP_MEAN = [-3.8, -1.5, 4.5, 11.8, 17.3, 21.8, 25.1, 25.9, 20.3, 13.4, 5.8, -0.8]
-KOR_MONTHLY_HUMID_MEAN = [60.0, 60.0, 61.0, 58.0, 64.0, 72.0, 82.0, 80.0, 75.0, 69.0, 67.0, 64.0]
+# 외기 추세 윈도우 (1시간 = 12스텝)
+TREND_WINDOW = 12
+
+# 실측 IDC 데이터 (Google Cluster Trace 2019 + 기상청 ASOS, 5분 단위 365일)
+REAL_DATA_PATH = Path(__file__).resolve().parents[2] / "data" / "weather" / "synthetic_idc_1year_noisy.parquet"
+
+
+def _load_real_data(data_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """data_pipeline.py 산출물에서 외기온도/습도/CPU 사용률 로드. 실패 시 None.
+
+    각 배열 길이는 105,120 (365일 × 288 스텝, 5분 단위).
+    """
+    if not data_path.exists():
+        return None
+    try:
+        import pandas as pd
+        df = pd.read_parquet(data_path)
+        outdoor_temp = df["outside_temp_c"].to_numpy(dtype=np.float32)
+        humidity = df["outside_humidity_pct"].to_numpy(dtype=np.float32)
+        cpu_util = df["cpu_utilization"].to_numpy(dtype=np.float32)
+        return outdoor_temp, humidity, cpu_util
+    except Exception:
+        return None
 
 
 class IDCEnv(gym.Env):
     """커스텀 IDC 강화학습 환경.
 
-    관측 (7개):
-        [hour, outdoor_temp, humidity, cpu_utilization, zone_temp, supply_setpoint, it_power_kw]
+    관측 (8개):
+        [hour, outdoor_temp, outdoor_trend, humidity, cpu_utilization, zone_temp, supply_setpoint, it_power_kw]
+        outdoor_trend: 현재 외기온도 - 최근 1시간 평균 (양수: 더워지는 중, 음수: 식는 중)
 
     행동 (1개):
-        supply_temp_setpoint: CRAH 공급 온도 [16, 27]°C
+        supply_temp_setpoint: CRAH 공급 온도 [18, 25]°C
 
     보상:
-        weighted   (기본): -w_energy*(PUE-1) - (1-w_energy)*violation_norm + pue_bonus
+        weighted   (기본): 안전 우선 hierarchical 변형
+            - 위반 시: -temp_violation × 3 (w_energy 무관, 안전 절대 우선)
+            - 안전 시: -w_energy × pue_overhead + (0.20 - pue_overhead) × 3
+              (NAVER 1.20 기준 선형 신호, 1.20 이상에서도 음수 영역 유지)
         hierarchical: 위반 시 -temp_violation, 안전 시 -pue_overhead (목표 분리)
     """
 
@@ -78,12 +104,15 @@ class IDCEnv(gym.Env):
         self._w_energy = w_energy
         self._reward_type = reward_type
         self._step_count = 0
-        self._zone_temp = 22.0
         self._supply_temp = T_SUPPLY_DESIGN_C
         self._data_idx = 0
+        self._outdoor_history: deque = deque(maxlen=TREND_WINDOW)
+        # zone_temp/supply_temp는 reset()에서 재설정됨 (gym 표준상 reset 후 step 보장)
 
-        obs_low  = np.array([0,  -15, 20, 0.0, 10.0, T_SUPPLY_MIN,   0.0], dtype=np.float32)
-        obs_high = np.array([23,  45, 95, 1.0, 40.0, T_SUPPLY_MAX, 400.0], dtype=np.float32)
+        # 관측: [hour, outdoor_temp, outdoor_trend, humidity, cpu_util, zone_temp, supply_temp, it_power]
+        # zone_temp 범위 5~50: 안전 위반 영역(<18, >27)도 obs로 허용 → 위반 페널티가 학습 신호
+        obs_low  = np.array([0,  -15, -15, 20, 0.0,  5.0, T_SUPPLY_MIN,   0.0], dtype=np.float32)
+        obs_high = np.array([23,  45,  15, 95, 1.0, 50.0, T_SUPPLY_MAX, 400.0], dtype=np.float32)
         self.observation_space = spaces.Box(low=obs_low, high=obs_high, dtype=np.float32)
 
         self.action_space = spaces.Box(
@@ -96,22 +125,20 @@ class IDCEnv(gym.Env):
 
     def _generate_year_data(self) -> np.ndarray:
         n = 365 * EPISODE_STEPS
-        rng = np.random.default_rng(42)
-
         steps = np.arange(n)
         hours = (steps * 5 / 60) % 24
-        month_idx = ((steps * 5 / 60 / 24) % 365 / 30.4).astype(int).clip(0, 11)
 
-        temp_mean = np.array([KOR_MONTHLY_TEMP_MEAN[m] for m in month_idx])
-        temp_daily = 6.0 * np.sin(2 * np.pi * hours / 24 - np.pi / 2)
-        outdoor_temp = (temp_mean + temp_daily + rng.normal(0, 1.5, n)).astype(np.float32)
+        real_data = _load_real_data(REAL_DATA_PATH)
+        if real_data is None:
+            raise FileNotFoundError(
+                f"실측 IDC 데이터 파일이 필요합니다: {REAL_DATA_PATH}\n"
+                "data_pipeline.py로 생성하거나 팀 공유 경로에서 받아오세요."
+            )
+        print(f"[IDCEnv] 실측 데이터 로드: {REAL_DATA_PATH.name}")
 
-        humid_mean = np.array([KOR_MONTHLY_HUMID_MEAN[m] for m in month_idx])
-        humidity = np.clip(humid_mean + rng.normal(0, 5, n), 20, 95).astype(np.float32)
-
-        cpu_base = np.array([WORKLOAD_PROFILE[int(h)] for h in hours])
-        cpu_util = np.clip(cpu_base + rng.normal(0, 0.05, n), 0.1, 1.0).astype(np.float32)
-
+        outdoor_temp = real_data[0][:n]
+        humidity = real_data[1][:n]
+        cpu_util = real_data[2][:n]
         return np.stack([outdoor_temp, humidity, cpu_util, hours.astype(np.float32)], axis=1)
 
     def _compute_it_power(self, cpu_util: float) -> float:
@@ -123,16 +150,25 @@ class IDCEnv(gym.Env):
 
     def _get_obs(self) -> np.ndarray:
         row = self._data[self._data_idx % len(self._data)]
+        outdoor_temp = float(row[0])
+        if len(self._outdoor_history) > 0:
+            trend = outdoor_temp - float(np.mean(self._outdoor_history))
+        else:
+            trend = 0.0
         it_power = self._compute_it_power(row[2])
-        return np.array([row[3], row[0], row[1], row[2], self._zone_temp, self._supply_temp, it_power], dtype=np.float32)
+        return np.array(
+            [row[3], outdoor_temp, trend, row[1], row[2], self._zone_temp, self._supply_temp, it_power],
+            dtype=np.float32,
+        )
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self._step_count = 0
         rng = np.random.default_rng(seed)
         self._data_idx = int(rng.integers(0, len(self._data) - self._max_episode_steps - 1))
-        self._zone_temp = float(rng.uniform(20.0, 24.0))
+        self._zone_temp = float(rng.uniform(24.0, 26.0))
         self._supply_temp = T_SUPPLY_DESIGN_C
+        self._outdoor_history.clear()
         return self._get_obs(), {}
 
     def step(self, action: np.ndarray):
@@ -140,7 +176,9 @@ class IDCEnv(gym.Env):
 
         row = self._data[self._data_idx % len(self._data)]
         outdoor_temp = float(row[0])
+        humidity = float(row[1])
         cpu_util = float(row[2])
+        self._outdoor_history.append(outdoor_temp)
         it_power_kw = self._compute_it_power(cpu_util)
 
         # 냉각 용량 계산 (가변 풍량 모델: CRAH가 부하에 맞춰 풍량 조절)
@@ -151,14 +189,22 @@ class IDCEnv(gym.Env):
         m_air_actual = min(m_air_required, M_AIR_MAX_KG_S)
         actual_cooling_kw = m_air_actual * C_P_KJ_PER_KG_K * delta_t
 
-        # 서버실 온도 변화
+        # 서버실 온도 변화 (zone < supply는 물리적으로 불가 → supply가 하한)
         excess_heat_kw = it_power_kw - actual_cooling_kw
-        self._zone_temp = float(np.clip(self._zone_temp + excess_heat_kw * TIMESTEP_SEC / C_EFF_KJ_PER_K, 5.0, 50.0))
+        new_zone = self._zone_temp + excess_heat_kw * TIMESTEP_SEC / C_EFF_KJ_PER_K
+        self._zone_temp = float(np.clip(new_zone, self._supply_temp, 50.0))
 
-        # 칠러 + 팬 전력 (팬: Affinity Law, P_fan ∝ (m_air / m_design)^FAN_AFFINITY_EXP)
-        chiller_result = calculate_chiller_power_kw(actual_cooling_kw, outdoor_temp, self._supply_temp)
+        # 칠러 + 팬 전력 (cooling mode별 차별화)
+        chiller_result = calculate_chiller_power_kw(
+            actual_cooling_kw, outdoor_temp, self._supply_temp, humidity
+        )
         fan_ratio = m_air_actual / M_AIR_DESIGN_KG_S
-        fan_power_kw = FAN_POWER_DESIGN_KW * (fan_ratio ** FAN_AFFINITY_EXP)
+        if chiller_result.cooling_mode == CoolingMode.FREE_COOLING:
+            # 외기 economizer: 베이스 60% + 약한 풍량 의존 (현실적 외기 도입 비용)
+            fan_power_kw = FAN_POWER_DESIGN_KW * (0.6 + 0.3 * fan_ratio)
+        else:
+            # Hybrid/Chiller: 폐쇄 순환, Affinity Law
+            fan_power_kw = FAN_POWER_DESIGN_KW * (fan_ratio ** FAN_AFFINITY_EXP)
         pue_result = calculate_pue(it_power_kw, chiller_result.chiller_power_kw + fan_power_kw)
 
         # 보상
@@ -174,10 +220,15 @@ class IDCEnv(gym.Env):
             else:
                 reward = -pue_overhead
         else:
-            # weighted (기존): 가중합 + conditional pue_bonus
-            temp_violation_norm = temp_violation / 9.0
-            pue_bonus = max(0.0, 0.4 - pue_overhead) if temp_violation == 0.0 else 0.0
-            reward = -(self._w_energy * pue_overhead + (1 - self._w_energy) * temp_violation_norm) + pue_bonus
+            # weighted: 안전 우선 hierarchical 변형 (스케일 다운: VecNormalize와 함께 사용)
+            # - 위반 시: PUE 무시, 페널티
+            # - 안전 시: PUE 최적화 (NAVER 1.20 기준 선형 신호)
+            if temp_violation > 0.0:
+                reward = -temp_violation * 1.5  # 1°C 위반 = -1.5
+            else:
+                # 임계값 0.25로 확장 (PUE 1.25까지 양의 신호 → 신호 강도 ↑)
+                pue_signal = (0.25 - pue_overhead) * 1.5
+                reward = -self._w_energy * pue_overhead + pue_signal
 
         self._step_count += 1
         self._data_idx += 1

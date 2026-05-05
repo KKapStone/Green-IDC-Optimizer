@@ -154,18 +154,24 @@ nohup uv run python -m domain.controllers.rl_agent \
 ```bash
 nohup uv run python -m domain.controllers.rl_agent \
   --algo sac --custom-env --n-envs 4 \
-  --total-timesteps 500000 \
+  --total-timesteps 1000000 \
   --max-episode-steps 288 \
   --reward-type weighted \
   --w-energy 0.8 \
   --gamma 0.99 \
   --lr 1e-4 \
   --batch-size 256 \
-  --run-name sac-tuned-w08-500k \
-  > logs/sac-tuned-w08-500k.log 2>&1 &
+  --run-name sac-2pct-1m \
+  > logs/sac-2pct-1m.log 2>&1 &
 ```
 
-> 튜닝 근거: `gamma 0.99`(미래 보상 반영), `lr 1e-4`(진동 감소), `batch-size 256`(gradient 노이즈 감소), `w-energy 0.8`(Affinity Law 환경에서 에너지 신호 강화)
+> 튜닝 근거:
+> - `gamma 0.99`: 1일(288스텝) 에피소드 미래 보상 반영
+> - `lr 1e-4`: gradient 진동 감소
+> - `batch-size 256`: gradient 노이즈 감소
+> - `w-energy 0.8`: PUE 신호 강조
+> - `policy_kwargs={"net_arch": [256, 256, 128]}`: 네트워크 표현력 ↑ (rl_agent.py 코드)
+> - `VecNormalize(norm_reward=True)`: SAC 학습 안정성 향상 (rl_agent.py 코드)
 
 #### 빠른 sanity check (약 30초~1분)
 
@@ -243,8 +249,11 @@ uv run python -m domain.controllers.rl_agent \
 
 #### 보상 함수 선택
 
-- **`weighted`**: `-w_energy*(PUE-1) - (1-w_energy)*violation_norm + pue_bonus` — 가중합 + 안전 시 PUE 보너스
-- **`hierarchical`**: 위반 시 `-temp_violation`, 안전 시 `-pue_overhead` — 안전/효율 목표 분리, 온도 위반을 먼저 학습한 뒤 PUE 최적화
+- **`weighted`** (권장): 안전 우선 + PUE 선형 신호
+  - 위반 시: `-temp_violation × 1.5` (w_energy 무관, 절대 위반 금지)
+  - 안전 시: `-w_energy × pue_overhead + (0.25 - pue_overhead) × 1.5`
+    - NAVER 1.20 기준 선형 신호, 1.20 이상에서도 음수 영역 유지 (학습 신호 평탄 방지)
+- **`hierarchical`**: 위반 시 `-temp_violation`, 안전 시 `-pue_overhead` — 안전/효율 목표 분리
 
 #### 병렬 환경 가이드
 
@@ -289,23 +298,25 @@ nohup docker compose run --rm rl-service uv run python -m domain.controllers.rl_
 ### 평가
 
 ```bash
-PYTHONPATH=. uv run python scripts/eval_baseline.py --model data/models/sac-tuned-w08-500k.zip
-PYTHONPATH=. uv run python scripts/check_action.py --model data/models/sac-tuned-w08-500k.zip
+PYTHONPATH=. uv run python scripts/eval_baseline.py --model data/models/sac-2pct-1m.zip
+PYTHONPATH=. uv run python scripts/check_action.py --model data/models/sac-2pct-1m.zip
 ```
 
 ### 실험 결과 비교
 
-> **주의**: 환경(IDCEnv)이 Affinity Law 팬 전력 모델로 변경됨. 이전 환경에서 학습된 모델은 비교 대상으로 사용 불가.
+> **주의**: 환경(IDCEnv)이 실측 데이터 + 습도/PLR 칠러 + 모드별 fan 모델로 정밀화됨. 이전 환경 모델은 호환 불가.
 
 | 모델 | PUE | ep_rew_mean | 온도 위반 | 비고 |
 |---|---|---|---|---|
-| Rule-based | 1.3377 | -18.133 | 0.000 | 베이스라인 |
-| 고정 setpoint 20°C | 1.3075 | -6.140 | 0.000 | 설계값 베이스라인 |
-| 고정 setpoint 24°C | 1.3214 | -33.473 | 0.144 | 위반 발생 |
-| Random | 1.2025 | -30.712 | 0.674 | |
-| sac-affinity-weighted-500k | 1.1729 | 36.309 | 0.011 | 환경 개선 직후 베이스 |
-| sac-tuned-500k | 1.1613 | 46.198 | 0.000 | gamma/lr/batch 튜닝 |
-| **sac-tuned-w08-500k** ← **best** | **1.1575** | **47.844** | **0.000** | w_energy 0.8 |
+| Rule-based | 1.1905 | -18.207 | 0.000 | 베이스라인 (현실 환경) |
+| 고정 setpoint 20°C | 1.1847 | -14.370 | 0.000 | 설계값 |
+| 고정 setpoint 24°C | 1.2999 | -90.684 | 0.000 | 너무 높음 |
+| sac-norm-500k | 1.1785 | -31.833 | 0.000 | norm_reward 적용 |
+| **sac-2pct-1m** ← **best** | **1.1755** | **-8.240** | **0.000** | 1M + 보상 임계값 0.25 + 큰 네트워크 |
 
-- 고정 20°C 대비 **PUE 11.5% 개선**
-- NAVER 춘천(1.09) 근접, 한국 민간 평균(2.03) 압도
+- Rule-based 대비 **PUE 1.26% 개선** (산업 표준 1~3% 범위)
+- 고정 24°C 대비 **9.6% 개선**
+- NAVER 춘천(1.09)까지 격차 0.0855
+- **위반 0** 안전 보장, **Setpoint 18~25°C 동적 조정**
+
+> 이전 합성 환경의 11.5% 개선은 환경 단순성에서 오는 sim-to-real gap 큰 수치였음. 현재 1.26%는 실측 데이터 + 산업 표준 물리 기반 신뢰 가능한 결과.

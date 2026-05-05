@@ -94,7 +94,7 @@ def make_env(
         for _ in range(n_envs)
     ]
     vec_env = SubprocVecEnv(env_fns) if n_envs > 1 else DummyVecEnv(env_fns)
-    return VecNormalize(vec_env, norm_obs=True, norm_reward=False, clip_obs=10.0)
+    return VecNormalize(vec_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
 
 
 def make_env_raw(max_episode_steps: int = 96, w_energy: float = 0.5, custom_env: bool = False, reward_type: str = "weighted") -> DummyVecEnv:
@@ -169,6 +169,7 @@ def train(
                 gamma=gamma,
                 tau=0.005,
                 ent_coef="auto",
+                policy_kwargs={"net_arch": [256, 256, 128]},  # 기본 [256, 256]보다 확장
                 verbose=1,
                 tensorboard_log=None,
                 device=device,

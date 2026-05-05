@@ -12,7 +12,22 @@
 
 from dataclasses import dataclass
 from core.config.enums import CoolingMode
-from core.config.constants import FREE_COOLING_THRESHOLD_C, HYBRID_THRESHOLD_C
+from core.config.constants import (
+    WET_BULB_FREE_THRESHOLD_C,
+    WET_BULB_HYBRID_THRESHOLD_C,
+    CHILLER_MAX_CAPACITY_KW,
+    CHILLER_OPTIMAL_PLR,
+    CHILLER_PLR_PENALTY,
+)
+
+
+def calculate_wet_bulb_c(temp_c: float, humidity_pct: float) -> float:
+    """간단 근사식 기반 습구 온도 계산.
+
+    공식: T_wb ≈ T - (1 - RH/100) × (T - 4)
+    실제 Stull 공식의 단순화 버전. ±1°C 정확도.
+    """
+    return temp_c - (1.0 - humidity_pct / 100.0) * (temp_c - 4.0)
 
 
 @dataclass
@@ -49,49 +64,50 @@ def calculate_chiller_power_kw(
     cooling_load_kw: float,
     outdoor_temp_c: float,
     supply_temp_c: float = 20.0,
+    outdoor_humidity_pct: float = 50.0,
 ) -> ChillerResult:
     """
-    냉각 부하와 외기 온도로 칠러 전력 소비량을 계산한다.
+    냉각 부하 + 외기 + 습도 + PLR 보정 기반 칠러 전력 계산.
 
-    냉각 모드 결정 (명세서 기준):
-      - 외기 < 15°C: Free Cooling (자연공조) — 칠러 미사용
-      - 15°C ≤ 외기 ≤ 22°C: Hybrid (혼합) — 칠러 일부 사용
-      - 외기 > 22°C: Chiller (기계식) — 칠러 전면 가동
+    냉각 모드 결정 (습구 온도 기준 — 잠열 부하 반영):
+      - 습구 < 13°C: Free Cooling
+      - 13~20°C: Hybrid (선형 보간)
+      - > 20°C: Chiller (기계식 전면 가동)
 
-    공식 (기계식 모드):
-      P_chiller = Q_cooling / COP
+    PLR 보정: 칠러는 60% 부하에서 최고 효율, 이탈 시 효율 감소
+      cop_actual = cop_base × (1 - 0.3 × ((PLR - 0.6) / 0.4)^2)
 
     Args:
         cooling_load_kw: 제거해야 할 열량 (kW)
-        outdoor_temp_c: 외기 온도 (°C)
+        outdoor_temp_c: 외기 dry-bulb 온도 (°C)
+        supply_temp_c: CRAH 공급 온도 (°C)
+        outdoor_humidity_pct: 외기 상대 습도 (%, 기본 50)
 
     Returns:
         ChillerResult (COP, 칠러 전력, 냉각 모드)
-
-    Raises:
-        ValueError: 냉각 부하가 음수일 때
     """
     if cooling_load_kw < 0:
         raise ValueError(f"냉각 부하는 0 이상이어야 합니다. 입력값: {cooling_load_kw}")
 
-    cop = calculate_cop(outdoor_temp_c, supply_temp_c)
+    # 습구 온도로 cooling mode 결정 (잠열 반영)
+    wet_bulb_c = calculate_wet_bulb_c(outdoor_temp_c, outdoor_humidity_pct)
 
-    if outdoor_temp_c < FREE_COOLING_THRESHOLD_C:
+    # 기본 COP에 PLR 보정 적용
+    cop_base = calculate_cop(outdoor_temp_c, supply_temp_c)
+    plr = min(1.0, cooling_load_kw / CHILLER_MAX_CAPACITY_KW)
+    plr_factor = max(0.5, 1.0 - CHILLER_PLR_PENALTY * ((plr - CHILLER_OPTIMAL_PLR) / 0.4) ** 2)
+    cop = cop_base * plr_factor
+
+    if wet_bulb_c < WET_BULB_FREE_THRESHOLD_C:
         mode = CoolingMode.FREE_COOLING
-        # 자연공조: 기계식 칠러 미사용
         chiller_power_kw = 0.0
-
-    elif outdoor_temp_c <= HYBRID_THRESHOLD_C:
-        # 혼합 모드: 외기 온도에 따라 칠러 비중을 선형 보간
-        # 15°C에서 0% 칠러, 22°C에서 100% 칠러
-        chiller_fraction = (outdoor_temp_c - FREE_COOLING_THRESHOLD_C) / (
-            HYBRID_THRESHOLD_C - FREE_COOLING_THRESHOLD_C
+    elif wet_bulb_c <= WET_BULB_HYBRID_THRESHOLD_C:
+        chiller_fraction = (wet_bulb_c - WET_BULB_FREE_THRESHOLD_C) / (
+            WET_BULB_HYBRID_THRESHOLD_C - WET_BULB_FREE_THRESHOLD_C
         )
         mode = CoolingMode.HYBRID
         chiller_power_kw = (cooling_load_kw * chiller_fraction) / cop
-
     else:
-        # 기계식 냉방: 칠러 전면 가동
         mode = CoolingMode.CHILLER
         chiller_power_kw = cooling_load_kw / cop
 

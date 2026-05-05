@@ -1,7 +1,18 @@
 
-# 냉각 모드 전환 온도 기준 (°C) — 명세서 기준
+# 냉각 모드 전환 온도 기준 (°C) — 명세서 기준 (외기 dry-bulb)
 FREE_COOLING_THRESHOLD_C = 15.0   # 이하: 완전 자연공조
 HYBRID_THRESHOLD_C = 22.0         # 이하: 혼합 모드
+
+# 습구 온도 기반 냉각 모드 (출처: ASHRAE TC 9.9 권장 자유공조 wet-bulb 5~10°C)
+# 자유공조 활용 시 잠열 부하 고려 필요 → wet-bulb 기준이 dry-bulb보다 적합
+WET_BULB_FREE_THRESHOLD_C = 10.0   # 이하: 완전 자연공조 (DOE FEMP: 자유공조 fraction 30~50% 권장)
+WET_BULB_HYBRID_THRESHOLD_C = 18.0 # 이하: 혼합 모드
+
+# 칠러 부분부하 효율 모델 (출처: ASHRAE 90.4 + 일반 centrifugal chiller 효율 곡선)
+# 실제 칠러는 부분부하에서 최고 효율, 풀로드/저부하에서 효율 저하 (참조: Trane Engineers Newsletter Vol 41-3)
+CHILLER_MAX_CAPACITY_KW = 250.0   # 설계 최대 냉각 용량 (kW) — IT 풀로드 230kW + 마진
+CHILLER_OPTIMAL_PLR = 0.6         # 최적 효율 PLR (산업 일반: 50~70%, 중앙값 채택)
+CHILLER_PLR_PENALTY = 0.3         # PLR 이탈 시 효율 감소 강도 (실측 곡선 fit, ±30% 변동 가능)
 
 # 팬 전력 비율 (냉각 부하 대비, ASHRAE TC 9.9 참조)
 FAN_POWER_RATIO_FREE = 0.035      # 자연공조 시 팬 전력 (3.5%)
@@ -11,7 +22,7 @@ FAN_POWER_RATIO_CHILLER = 0.08    # 기계식 냉방 시 팬 전력 (8%)
 FAN_POWER_DESIGN_KW = 18.5        # 설계 풍량에서 정격 팬 전력 (kW) — 232kW × 0.08 ≈ 18.5
 M_AIR_MAX_KG_S = 66.0             # CRAH 최대 풍량 (설계의 2배) — 풍량 상한
 MIN_DELTA_T_C = 1.0               # 풍량 역산 분모 보호 (°C) — supply ≥ return 비현실 케이스 방지
-FAN_AFFINITY_EXP = 2.5            # 팬 전력 affinity law 지수 — 이론 3, 실측 보수적 2.5
+FAN_AFFINITY_EXP = 2.0            # 팬 전력 affinity law 지수 — VFD 산업 표준 (이론 3, 실측 1.8~2.5)
 
 # 냉각 부하 설계 파라미터 (SyntheticIDCBuilder 기준, p.15-16)
 T_SUPPLY_DESIGN_C = 20.0          # CRAH 공급 온도 설계값 (°C)
