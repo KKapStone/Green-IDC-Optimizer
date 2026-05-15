@@ -78,13 +78,22 @@ def _build_obs(req: ControlRequest) -> np.ndarray:
     ], dtype=np.float32)
 
 
-def _derive_cooling_metadata(outdoor_temp_c: float) -> tuple[CoolingMode, float]:
-    """외기 온도 기반 cooling_mode + free_cooling_ratio 계산 (rule_based와 동일 기준)."""
-    cooling_mode = decide_cooling_mode(outdoor_temp_c)
+def _derive_cooling_metadata(
+    outdoor_temp_c: float,
+    outdoor_humidity_pct: float,
+) -> tuple[CoolingMode, float]:
+    """외기 + 습도 기반 cooling_mode + free_cooling_ratio 계산 (wet-bulb 기준).
+
+    rule_based / chiller / free_cooling 모듈과 환경 일관성 유지.
+    """
+    cooling_mode = decide_cooling_mode(outdoor_temp_c, outdoor_humidity_pct)
     if cooling_mode == CoolingMode.FREE_COOLING:
         ratio = 1.0
     elif cooling_mode == CoolingMode.HYBRID:
-        ratio = 1 - (outdoor_temp_c - FREE_COOLING_THRESHOLD_C) / (HYBRID_THRESHOLD_C - FREE_COOLING_THRESHOLD_C)
+        wet_bulb = calculate_wet_bulb_c(outdoor_temp_c, outdoor_humidity_pct)
+        ratio = 1.0 - (wet_bulb - WET_BULB_FREE_THRESHOLD_C) / (
+            WET_BULB_HYBRID_THRESHOLD_C - WET_BULB_FREE_THRESHOLD_C
+        )
     else:
         ratio = 0.0
     return cooling_mode, ratio
@@ -104,7 +113,7 @@ def rl_control(req: ControlRequest) -> ControlResponse:
     except FileNotFoundError as e:
         raise HTTPException(status_code=503, detail=f"RL 모델 로드 실패: {e}")
 
-    cooling_mode, ratio = _derive_cooling_metadata(req.outdoor_temp_c)
+    cooling_mode, ratio = _derive_cooling_metadata(req.outdoor_temp_c, req.outdoor_humidity)
     return ControlResponse(
         cooling_mode=cooling_mode.value,
         supply_air_temp_setpoint_c=setpoint,
@@ -130,7 +139,7 @@ def rl_hybrid_control(req: ControlRequest) -> ControlResponse:
     except FileNotFoundError as e:
         raise HTTPException(status_code=503, detail=f"RL 모델 로드 실패: {e}")
 
-    cooling_mode, ratio = _derive_cooling_metadata(req.outdoor_temp_c)
+    cooling_mode, ratio = _derive_cooling_metadata(req.outdoor_temp_c, req.outdoor_humidity)
     return ControlResponse(
         cooling_mode=cooling_mode.value,
         supply_air_temp_setpoint_c=setpoint,
