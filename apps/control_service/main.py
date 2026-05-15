@@ -1,10 +1,11 @@
 import numpy as np
 from fastapi import FastAPI, HTTPException
 
-from core.config.constants import FREE_COOLING_THRESHOLD_C, HYBRID_THRESHOLD_C
+from core.config.constants import WET_BULB_FREE_THRESHOLD_C, WET_BULB_HYBRID_THRESHOLD_C
 from core.config.enums import CoolingMode
 from core.schemas.control import ControlRequest, ControlResponse
 from domain.controllers.rule_based import decide_cooling_mode, run_rule_based
+from domain.thermodynamics.chiller import calculate_wet_bulb_c
 
 app = FastAPI(title="Control Service")
 
