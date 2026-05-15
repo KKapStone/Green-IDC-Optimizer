@@ -55,6 +55,14 @@ EPISODE_STEPS = 288  # 1일 (5분 × 288)
 # 외기 추세 윈도우 (1시간 = 12스텝)
 TREND_WINDOW = 12
 
+# Domain randomization (Step 3 fine-tune용) — 에피소드 단위 시나리오 샘플
+# 분포: 평상시 40% / 위기 3종 각 20%. CRISIS_CONFIGS와 일관 (server_surge ×1.3, heat_wave +5~10°C, chiller 0.3~0.7배 효율).
+DR_SCENARIOS = ("normal", "server_surge", "heat_wave", "chiller_derate")
+DR_SCENARIO_WEIGHTS = (0.40, 0.20, 0.20, 0.20)
+DR_SERVER_SURGE_MULT = 1.3
+DR_HEAT_WAVE_SHIFT_RANGE = (5.0, 10.0)
+DR_CHILLER_DERATE_RANGE = (1.5, 3.3)  # chiller_power × factor (= COP × 0.3~0.67의 역수)
+
 # 실측 IDC 데이터 (Google Cluster Trace 2019 + 기상청 ASOS, 5분 단위 365일)
 REAL_DATA_PATH = Path(__file__).resolve().parents[2] / "data" / "weather" / "synthetic_idc_1year_noisy.parquet"
 
@@ -98,7 +106,14 @@ class IDCEnv(gym.Env):
 
     metadata = {"render_modes": []}
 
-    def __init__(self, max_episode_steps: int = EPISODE_STEPS, w_energy: float = 0.5, reward_type: str = "weighted"):
+    def __init__(
+        self,
+        max_episode_steps: int = EPISODE_STEPS,
+        w_energy: float = 0.5,
+        reward_type: str = "weighted",
+        domain_randomize: bool = False,
+        force_scenario: str | None = None,
+    ):
         super().__init__()
 
         self._max_episode_steps = max_episode_steps
@@ -108,6 +123,17 @@ class IDCEnv(gym.Env):
         self._supply_temp = T_SUPPLY_DESIGN_C
         self._data_idx = 0
         self._outdoor_history: deque = deque(maxlen=TREND_WINDOW)
+
+        # Domain randomization 상태 (reset마다 재샘플)
+        # force_scenario: 평가용 — 특정 시나리오 100% 강제 ("normal" | "server_surge" | "heat_wave" | "chiller_derate")
+        if force_scenario is not None and force_scenario not in DR_SCENARIOS:
+            raise ValueError(f"force_scenario는 {DR_SCENARIOS} 중 하나여야 합니다: {force_scenario}")
+        self._domain_randomize = domain_randomize
+        self._force_scenario = force_scenario
+        self._scenario = "normal"
+        self._server_surge_mult = 1.0
+        self._heat_wave_shift = 0.0
+        self._chiller_derate_factor = 1.0
         # zone_temp/supply_temp는 reset()에서 재설정됨 (gym 표준상 reset 후 step 보장)
 
         # 관측: [hour, outdoor_temp, outdoor_trend, humidity, cpu_util, zone_temp, supply_temp, it_power, wet_bulb]
@@ -150,16 +176,38 @@ class IDCEnv(gym.Env):
             num_gpu_servers=NUM_GPU_SERVERS,
         )
 
+    def _apply_dr_obs(self, row: np.ndarray) -> tuple[float, float, float]:
+        """row → (augmented outdoor_temp, humidity, cpu_util). DR 비활성 시 원본 반환."""
+        outdoor_temp = float(row[0]) + self._heat_wave_shift
+        humidity = float(row[1])
+        cpu_util = min(1.0, float(row[2]) * self._server_surge_mult)
+        return outdoor_temp, humidity, cpu_util
+
     def _get_obs(self) -> np.ndarray:
         row = self._data[self._data_idx % len(self._data)]
-        outdoor_temp = float(row[0])
-        humidity = float(row[1])
+        outdoor_temp, humidity, cpu_util = self._apply_dr_obs(row)
         trend = outdoor_temp - float(np.mean(self._outdoor_history)) if self._outdoor_history else 0.0
         wet_bulb = calculate_wet_bulb_c(outdoor_temp, humidity)
-        it_power = self._compute_it_power(row[2])
+        it_power = self._compute_it_power(cpu_util)
         return np.array(
-            [row[3], outdoor_temp, trend, humidity, row[2], self._zone_temp, self._supply_temp, it_power, wet_bulb],
+            [row[3], outdoor_temp, trend, humidity, cpu_util, self._zone_temp, self._supply_temp, it_power, wet_bulb],
             dtype=np.float32,
+        )
+
+    def _sample_dr_scenario(self, rng: np.random.Generator) -> None:
+        """에피소드 단위 시나리오 1개 샘플. CRISIS_CONFIGS와 정렬된 augmentation 파라미터 설정."""
+        idx = int(rng.choice(len(DR_SCENARIOS), p=DR_SCENARIO_WEIGHTS))
+        self._set_scenario(DR_SCENARIOS[idx], rng)
+
+    def _set_scenario(self, scenario: str, rng: np.random.Generator) -> None:
+        """시나리오 라벨 → augmentation 파라미터 결정 (강제 적용 시 공통 경로)."""
+        self._scenario = scenario
+        self._server_surge_mult = DR_SERVER_SURGE_MULT if scenario == "server_surge" else 1.0
+        self._heat_wave_shift = (
+            float(rng.uniform(*DR_HEAT_WAVE_SHIFT_RANGE)) if scenario == "heat_wave" else 0.0
+        )
+        self._chiller_derate_factor = (
+            float(rng.uniform(*DR_CHILLER_DERATE_RANGE)) if scenario == "chiller_derate" else 1.0
         )
 
     def reset(self, seed=None, options=None):
@@ -170,15 +218,19 @@ class IDCEnv(gym.Env):
         self._zone_temp = float(rng.uniform(24.0, 26.0))
         self._supply_temp = T_SUPPLY_DESIGN_C
         self._outdoor_history.clear()
+        if self._force_scenario is not None:
+            self._set_scenario(self._force_scenario, rng)
+        elif self._domain_randomize:
+            self._sample_dr_scenario(rng)
+        else:
+            self._set_scenario("normal", rng)
         return self._get_obs(), {}
 
     def step(self, action: np.ndarray):
         self._supply_temp = float(np.clip(action[0], T_SUPPLY_MIN, T_SUPPLY_MAX))
 
         row = self._data[self._data_idx % len(self._data)]
-        outdoor_temp = float(row[0])
-        humidity = float(row[1])
-        cpu_util = float(row[2])
+        outdoor_temp, humidity, cpu_util = self._apply_dr_obs(row)
         self._outdoor_history.append(outdoor_temp)
         it_power_kw = self._compute_it_power(cpu_util)
 
@@ -199,6 +251,8 @@ class IDCEnv(gym.Env):
         chiller_result = calculate_chiller_power_kw(
             actual_cooling_kw, outdoor_temp, self._supply_temp, humidity
         )
+        # DR: chiller derating — 효율 저하로 같은 부하 처리에 더 많은 전력 소비
+        chiller_power_kw = chiller_result.chiller_power_kw * self._chiller_derate_factor
         fan_ratio = m_air_actual / M_AIR_DESIGN_KG_S
         if chiller_result.cooling_mode == CoolingMode.FREE_COOLING:
             # 외기 economizer: 베이스 60% + 약한 풍량 의존 (현실적 외기 도입 비용)
@@ -206,7 +260,7 @@ class IDCEnv(gym.Env):
         else:
             # Hybrid/Chiller: 폐쇄 순환, Affinity Law
             fan_power_kw = FAN_POWER_DESIGN_KW * (fan_ratio ** FAN_AFFINITY_EXP)
-        pue_result = calculate_pue(it_power_kw, chiller_result.chiller_power_kw + fan_power_kw)
+        pue_result = calculate_pue(it_power_kw, chiller_power_kw + fan_power_kw)
 
         # 보상
         pue_overhead = pue_result.pue - 1.0
@@ -238,9 +292,10 @@ class IDCEnv(gym.Env):
             "pue": pue_result.pue,
             "zone_temp_c": self._zone_temp,
             "it_power_kw": it_power_kw,
-            "cooling_power_kw": chiller_result.chiller_power_kw + fan_power_kw,
+            "cooling_power_kw": chiller_power_kw + fan_power_kw,
             "temp_violation": temp_violation,
             "cooling_mode": chiller_result.cooling_mode.value,
+            "dr_scenario": self._scenario,
         }
 
 
