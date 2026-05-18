@@ -23,7 +23,6 @@ from apps.dashboard.constants import (
     NAVER_PUE_BENCHMARK,
     PUE_BENCHMARKS,
     PUE_GAUGE_STEPS,
-    TEMP_WARNING_THRESHOLD_C,
 )
 
 
@@ -51,23 +50,10 @@ def build_pue_gauge(avg_pue: float, title: str = "PUE (24h 평균)") -> go.Figur
     return fig
 
 
-def build_power_trend(
-    df: pd.DataFrame,
-    df_full: pd.DataFrame | None = None,
-    anim_hour: int | None = None,
-) -> go.Figure:
-    """전력 소비 추이. 애니메이션 모드면 df_full을 흐린 배경으로 표시."""
+def build_power_trend(df: pd.DataFrame) -> go.Figure:
+    """전력 소비 추이."""
     hours = list(range(len(df)))
     fig = go.Figure()
-
-    if df_full is not None and anim_hour is not None:
-        full_hours = list(range(24))
-        for col, color in [("IT 전력 (kW)", CLR_IT), ("총 전력 (kW)", CLR_TOTAL)]:
-            fig.add_trace(go.Scatter(
-                x=full_hours, y=df_full[col],
-                line=dict(color=color, width=1, dash="dot"),
-                opacity=0.2, showlegend=False, hoverinfo="skip",
-            ))
 
     fig.add_trace(go.Scatter(
         x=hours, y=df["IT 전력 (kW)"],
@@ -82,72 +68,12 @@ def build_power_trend(
         name="총 전력", line=dict(color=CLR_TOTAL, dash="dot", width=2),
     ))
 
-    if anim_hour is not None and len(hours) > 0:
-        fig.add_vline(
-            x=hours[-1], line_dash="solid", line_color="#E74C3C", line_width=2,
-            annotation_text=f"{hours[-1]:02d}:00", annotation_position="top right",
-        )
-
     fig.update_layout(
         title="전력 소비 추이 (kW)", height=300,
         margin=dict(t=40, b=70, l=10, r=10),
         xaxis=dict(title="시간 (h)", range=[-0.5, 23.5], dtick=4),
         yaxis_title="전력 (kW)",
         legend=dict(orientation="h", y=-0.32),
-    )
-    return fig
-
-
-def build_pue_trend(
-    df: pd.DataFrame,
-    df_full: pd.DataFrame | None = None,
-    anim_hour: int | None = None,
-) -> go.Figure:
-    hours = list(range(len(df)))
-    fig = go.Figure()
-
-    if df_full is not None and anim_hour is not None:
-        fig.add_trace(go.Scatter(
-            x=list(range(24)), y=df_full["PUE"],
-            line=dict(color=CLR_GOOD, width=1, dash="dot"),
-            opacity=0.2, showlegend=False, hoverinfo="skip",
-        ))
-
-    fig.add_trace(go.Scatter(
-        x=hours, y=df["PUE"],
-        line=dict(color=CLR_GOOD, width=2), mode="lines+markers",
-        showlegend=False,
-    ))
-    fig.add_hline(
-        y=NAVER_PUE_BENCHMARK, line_dash="dash", line_color="gray",
-        annotation_text=f"{NAVER_PUE_BENCHMARK} (NAVER)",
-    )
-
-    if anim_hour is not None and len(hours) > 0:
-        fig.add_vline(x=hours[-1], line_dash="solid", line_color="#E74C3C", line_width=2)
-
-    fig.update_layout(
-        height=320, margin=dict(t=20, b=50, l=10, r=10),
-        xaxis=dict(title="시간 (h)", range=[-0.5, 23.5]),
-        yaxis_title="PUE", showlegend=False,
-    )
-    return fig
-
-
-def build_rack_temp_chart(
-    labels: list, temps: list, colors: list,
-    y_min: float, y_max: float,
-) -> go.Figure:
-    fig = go.Figure(go.Bar(x=labels, y=temps, marker_color=colors))
-    fig.add_hline(
-        y=TEMP_WARNING_THRESHOLD_C, line_dash="dash", line_color="red",
-        annotation_text=f"경고 {TEMP_WARNING_THRESHOLD_C}°C",
-    )
-    fig.update_layout(
-        title="서버 온도 분포 (피크 시간)", height=300,
-        margin=dict(t=40, b=50, l=10, r=10),
-        xaxis_title="랙", yaxis_title="온도 (°C)",
-        yaxis=dict(range=[y_min, y_max]),
     )
     return fig
 
