@@ -8,10 +8,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pandas as pd
+import streamlit as st
 
 from apps.dashboard.constants import (
+    CARBON_FACTOR_KG_PER_KWH,
     CARBON_FACTOR_TCO2_PER_MWH,
     CRISIS_CONFIGS,
+    DEFAULT_HUMIDITY_PCT,
     ELECTRICITY_COST_KRW_PER_KWH,
     SCENARIO_TEMP_PROFILES,
     WORKLOAD_PROFILE,
@@ -112,6 +115,7 @@ def _compute_row(
     return {
         "시간":           hour_label,
         "외기온도 (°C)":  round(outdoor_temp, 1),
+        "외기 습도 (%)":  round(humidity, 1),
         "CPU 사용률 (%)": round(util * 100, 1),
         "IT 전력 (kW)":   round(it_power_kw, 1),
         "냉각 부하 (kW)": round(cooling_load, 1),
@@ -185,7 +189,7 @@ def _run_simulation_sin_fallback(
         rows.append(_compute_row(
             hour_label=f"{hour:02d}:00",
             outdoor_temp=outdoor_temp,
-            humidity=60.0,
+            humidity=DEFAULT_HUMIDITY_PCT,
             util=util,
             num_cpu=num_cpu,
             num_gpu=num_gpu,
@@ -196,6 +200,7 @@ def _run_simulation_sin_fallback(
     return pd.DataFrame(rows)
 
 
+@st.cache_data(show_spinner=False)
 def run_simulation(
     scenario_name: str,
     num_cpu: int,
@@ -209,6 +214,9 @@ def run_simulation(
     1년치 noisy parquet(RL/A-B/Forecast가 공유하는 동일 데이터셋)에서 시즌 대표
     24h를 슬라이스해 도메인 열역학으로 PUE/COP를 계산한다. parquet 미존재 시
     sin 곡선 폴백.
+
+    @st.cache_data: 동일 입력으로 페이지 전환·재실행 시 즉시 캐시 반환 (crisis_mode
+    토글로 base와 비교 시 두 번 호출되는 비용도 캐시로 흡수).
     """
     try:
         return _run_simulation_from_parquet(
@@ -301,12 +309,13 @@ def calculate_esg(df: pd.DataFrame) -> dict:
 
     carbon_tco2 = total_energy_kwh * CARBON_FACTOR_TCO2_PER_MWH / 1000
     cost_krw    = total_energy_kwh * ELECTRICITY_COST_KRW_PER_KWH
-    cue         = carbon_tco2 / it_energy_kwh if it_energy_kwh > 0 else 0.0  # kgCO₂/kWh
+    # Green Grid CUE = 총탄소 / IT에너지 (kgCO₂eq/kWh). PUE × 배출계수와 동치.
+    cue_kg_per_kwh = (total_energy_kwh / it_energy_kwh) * CARBON_FACTOR_KG_PER_KWH if it_energy_kwh > 0 else 0.0
 
     return {
         "carbon_tco2_day":   round(carbon_tco2, 3),
         "carbon_tco2_month": round(carbon_tco2 * 30, 1),
         "cost_krw_day":      round(cost_krw / 1e4, 2),        # 만원 (1만원 = 1e4원)
         "cost_krw_month":    round(cost_krw * 30 / 1e4, 1),   # 만원
-        "cue":               round(cue * 1000, 4),             # tCO₂/kWh → kgCO₂/kWh
+        "cue":               round(cue_kg_per_kwh, 4),         # kgCO₂/kWh
     }

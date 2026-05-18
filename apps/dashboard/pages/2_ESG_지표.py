@@ -51,15 +51,16 @@ st.divider()
 
 # ── 시간별 탄소/비용 누적 차트 ────────────────────────────────────────────
 
+df    = d["df"]
+hours = list(range(len(df)))
+
 col_carbon, col_cost = st.columns(2)
 
 with col_carbon:
     with st.container(border=True):
         st.subheader("시간별 탄소 배출 누적")
-        df = d["df"]
         hourly_carbon = df["총 전력 (kW)"] * CARBON_FACTOR_TCO2_PER_MWH / 1000  # tCO₂/h
         cumulative    = hourly_carbon.cumsum()
-        hours         = list(range(len(df)))
 
         fig = go.Figure()
         fig.add_trace(go.Bar(
@@ -111,7 +112,7 @@ st.divider()
 
 with st.container(border=True):
     st.subheader("냉각 방식별 탄소 배출 (시간 평균 kgCO₂/h)")
-    st.plotly_chart(build_carbon_bar(d["df"]), width="stretch")
+    st.plotly_chart(build_carbon_bar(df), width="stretch")
 
 st.divider()
 

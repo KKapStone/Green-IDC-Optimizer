@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from apps.dashboard.constants import (
-    CARBON_FACTOR_TCO2_PER_MWH,
+    CARBON_FACTOR_KG_PER_KWH,
     CLR_CHILLER,
     CLR_DANGER,
     CLR_GOOD,
@@ -92,8 +92,9 @@ def build_cooling_donut(df: pd.DataFrame) -> go.Figure:
 
 
 def build_carbon_bar(df: pd.DataFrame) -> go.Figure:
+    # 평균 kW × kgCO₂/kWh = kgCO₂/h (시간당 평균 전력 × 배출계수)
     mode_carbon = df.groupby("냉각 모드").apply(
-        lambda g: g["총 전력 (kW)"].mean() * CARBON_FACTOR_TCO2_PER_MWH
+        lambda g: g["총 전력 (kW)"].mean() * CARBON_FACTOR_KG_PER_KWH
     ).reset_index()
     mode_carbon.columns = ["모드_key", "탄소(kgCO₂/h)"]
     mode_carbon["색상"] = mode_carbon["모드_key"].map(MODE_COLOR_MAP)
@@ -156,18 +157,3 @@ def render_pue_benchmarks(avg_pue: float | None = None) -> None:
         unsafe_allow_html=True,
     )
 
-
-def render_ctrl_recommendation(result: dict, label: str) -> None:
-    """제어 서비스 추천값을 렌더링한다. 오프라인이면 경고 표시."""
-    if "error" in result:
-        st.warning(f"{label}: 서비스 오프라인")
-    else:
-        mode_ko = COOLING_MODE_LABELS.get(result.get("cooling_mode", ""), result.get("cooling_mode", "-"))
-        ratio   = result.get("free_cooling_ratio", 0.0)
-        st.write(
-            f"**{label}** — 모드: `{mode_ko}` | "
-            f"설정 온도: `{result.get('supply_air_temp_setpoint_c', '-')}°C` | "
-            f"Free Cooling 비율: `{ratio:.0%}`"
-            # TODO(Simulation Service): expected_pue 필드가 현재 고정값 1.35를 반환 중이므로 표시 생략.
-            # Simulation Service 연동 후 f" | 예상 PUE: `{result.get('expected_pue', '-'):.3f}`" 추가.
-        )
