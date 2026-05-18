@@ -55,6 +55,7 @@ PUE_BENCHMARKS = [
     if k in _PUE_LABEL_MAP
 ]
 
+# RL vs Rule-based A/B 페이지의 재생 속도 슬라이더 옵션
 ANIM_SPEED_OPTIONS = {
     "매우 빠르게 (0.1초)": 0.1,
     "빠르게 (0.2초)":      0.2,

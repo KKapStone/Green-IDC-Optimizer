@@ -194,8 +194,11 @@ def rl_hybrid_control(
 def call_forecast(
     horizon_hours: int = 24,
     include_prediction_interval: bool = True,
+    model_type: str = "lgbm",
 ) -> dict:
     """POST /api/v1/forecast — API Gateway 경유 IT 부하/냉각 수요 예측.
+
+    model_type: "lgbm" | "moving_avg" | "lstm" (ModelType enum과 정합).
 
     응답 predictions 리스트의 각 항목:
         timestamp, predicted_it_load_kw, predicted_cooling_load_kw,
@@ -206,6 +209,7 @@ def call_forecast(
         {
             "forecast_horizon_hours": horizon_hours,
             "include_prediction_interval": include_prediction_interval,
+            "model_type": model_type,
         },
     )
 

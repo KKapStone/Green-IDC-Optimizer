@@ -29,7 +29,6 @@ from apps.dashboard.constants import (
 from apps.dashboard.simulation import (
     calculate_esg,
     run_simulation,
-    simulate_rack_temperatures,
 )
 
 
@@ -41,9 +40,6 @@ def init_session_state() -> None:
         "prev_crisis":    None,
         "prev_temp_warn": False,
         "alarms":         [],
-        "anim_running":   False,
-        "anim_hour":      0,
-        "anim_speed":     0.4,
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -103,8 +99,11 @@ def render_sidebar() -> dict:
 
         st.divider()
         _sec("서버 구성")
-        num_cpu  = 400
-        num_gpu  = 20
+        # parquet(1년치 합성 데이터) 생성 시 구성과 동일하게 맞춤 — IT 전력/PUE 정합 확보.
+        # 참고: data/data_pipeline.py:445 → SyntheticIDCBuilder(num_servers=500), GPU 미포함.
+        num_cpu  = 500
+        num_gpu  = 0
+        st.caption(f":material/dns: CPU {num_cpu}대 · GPU {num_gpu}대")
         cpu_util = st.slider("평균 CPU 사용률 (%)", 10, 100, 60) / 100.0
 
         st.divider()
@@ -185,9 +184,6 @@ def render_sidebar() -> dict:
     current_outdoor  = df.loc[peak_idx, "외기온도 (°C)"]
     peak_it_power    = df.loc[peak_idx, "IT 전력 (kW)"]
 
-    rack_labels, rack_temps, rack_colors = simulate_rack_temperatures(peak_return_temp)
-    over_threshold = sum(1 for t in rack_temps if t > TEMP_WARNING_THRESHOLD_C)
-
     esg = calculate_esg(df)
 
     if crisis_mode:
@@ -253,10 +249,6 @@ def render_sidebar() -> dict:
         "current_mode":    current_mode,
         "current_outdoor": current_outdoor,
         "peak_it_power":   peak_it_power,
-        "rack_labels":     rack_labels,
-        "rack_temps":      rack_temps,
-        "rack_colors":     rack_colors,
-        "over_threshold":  over_threshold,
         "esg":             esg,
         "esg_base":        esg_base,
         "avg_pue_base":    avg_pue_base,
