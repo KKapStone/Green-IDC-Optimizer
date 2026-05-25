@@ -15,10 +15,10 @@ PUE·온도 위반 기준으로 비교한다.
 
 | 항목 | TD3 | SAC (비교) | PPO (비교) |
 |---|---|---|---|
-| 모델 파일 | `data/models/td3-idc-1m.zip` | `data/models/sac-wetbulb-1m.zip` | `data/models/ppo-idc-1m.zip` |
+| 모델 파일 | `data/models/td3-idc-1m.zip` | `data/models/sac-wetbulb-1m.zip` | `data/models/ppo-idc-1m-lr1e4.zip` |
 | 총 스텝 | 1,000,000 | 1,000,000 | 1,000,000 |
-| Learning Rate | 1e-4 | 1e-4 | 3e-4 |
-| Batch Size | 256 | 256 | 64 |
+| Learning Rate | 1e-4 | 1e-4 | 1e-4 |
+| Batch Size | 256 | 256 | 64 † |
 | Gamma | 0.99 | 0.99 | 0.99 |
 | Buffer Size | 200,000 | 200,000 | — (on-policy) |
 | Policy Delay | 2 | — | — |
@@ -27,7 +27,9 @@ PUE·온도 위반 기준으로 비교한다.
 | w_energy | 0.8 | 0.8 | 0.8 |
 | 보상 타입 | weighted | weighted | weighted |
 | 에피소드 길이 | 288 스텝 (1일) | 288 스텝 | 288 스텝 |
-| 순수 학습 시간 (추정) | 약 3~4시간 | 약 24분 | 약 22분 |
+| 순수 학습 시간 (추정) | 약 3~4시간 | 약 24분 | 약 15.5분 |
+
+> † **batch_size 의미 차이**: PPO의 64는 rollout 버퍼(2048스텝)를 쪼개는 미니배치 크기이고, TD3·SAC의 256은 replay buffer에서 샘플링하는 수로 서로 다른 개념. 직접 비교 대상이 아님.
 
 > **학습 시간 주의**: TD3 로그에 elapsed_sec 기준 대형 점프 3회 확인됨
 > (step ~330K: +33분, step ~387K→422K: +9시간). 컴퓨터 절전/일시중단으로 추정.
@@ -57,7 +59,7 @@ python -m domain.controllers.rl_agent \
 | Random | 1.2077 | 0.0000 | -29.571 | 25.59 |
 | Rule-based | 1.1894 | 0.0000 | -17.427 | 25.01 |
 | 고정 setpoint 20°C (설계값) | 1.1847 | 0.0000 | -14.370 | 25.01 |
-| PPO (ppo-idc-1m) | 1.1768 | 0.0000 | -9.145 | 25.01 |
+| PPO (ppo-idc-1m-lr1e4) | 1.1768 | 0.0000 | -9.145 | 25.01 |
 | **TD3 (td3-idc-1m)** | **1.1751** | **0.0000** | **-7.956** | **25.86** |
 | PID (zone target=24°C) | 1.1752 | 0.0000 | -8.025 | 25.55 |
 | SAC (sac-wetbulb-1m) | 1.1747 | 0.0000 | -7.724 | 25.76 |
@@ -83,9 +85,10 @@ python -m domain.controllers.rl_agent \
 - 초기 보상: `-33.9` → 80K 스텝 이후 양수 진입 → 최종 `+35.8`
 - 명확한 단조 상승 수렴 곡선
 
-### PPO (비교)
+### PPO (비교, lr=1e-4)
 
-- 초기~최종 보상 모두 음수 (-5 ~ -25 진동), TD3와 유사한 패턴
+- 초기 보상: `+3.08` (step 2,048) — 양수 시작 후 step 10K부터 음수 전환
+- 최종 보상: `-13.03`, `-5 ~ -27` 구간 진동, TD3와 유사한 불안정 패턴
 
 ---
 
