@@ -93,6 +93,7 @@ preset_label = st.select_slider(
     value="중형 IDC (서버 5,000대)",
 )
 num_servers = scale_presets[preset_label]
+ss.num_servers = num_servers
 eff = _scale(num_servers)
 
 def _hero_card_html(num_servers: int, amount: str, kwh: str, co2: str) -> str:
@@ -330,27 +331,31 @@ def playback_fragment():
     with pb_col:
         st.progress(progress_pct, text=f"경과 {elapsed_min // 60:02d}:{elapsed_min % 60:02d}")
 
-    rule_kwh = cur_rule['누적 kWh']
-    best_kwh = cur_best['누적 kWh']
-    diff_pct = (save_best_kwh / rule_kwh * 100) if rule_kwh > 0 else 0.0
-    is_saving = save_best_kwh >= 0
+    scale = ss.get("num_servers", SIM_BASE_SERVERS) / SIM_BASE_SERVERS
+    rule_kwh = cur_rule['누적 kWh'] * scale
+    best_kwh = cur_best['누적 kWh'] * scale
+    save_kwh_scaled = save_best_kwh * scale
+    save_krw_scaled = save_best_krw * scale
+    diff_pct = (save_kwh_scaled / rule_kwh * 100) if rule_kwh > 0 else 0.0
+    is_saving = save_kwh_scaled >= 0
     accent  = "#2ECC71" if is_saving else "#e74c3c"
     box_lbl = "절감액" if is_saving else "초과 사용"
+    n_disp  = ss.get("num_servers", SIM_BASE_SERVERS)
     st.markdown(
         f"<div style='display:flex;align-items:center;gap:12px;padding:10px 4px;'>"
         f"<div style='flex:1;text-align:center;padding:8px 12px;background:rgba(255,255,255,0.04);border-radius:8px;'>"
-        f"<div style='font-size:0.75rem;color:#90a4ae;margin-bottom:4px;'>Rule-based 누적</div>"
+        f"<div style='font-size:0.75rem;color:#90a4ae;margin-bottom:4px;'>Rule-based 누적 ({n_disp:,}대)</div>"
         f"<div style='font-size:1.35rem;font-weight:600;color:#b0bec5;'>{rule_kwh:,.1f} kWh</div>"
         f"</div>"
         f"<div style='font-size:1.2rem;color:#546e7a;'>→</div>"
         f"<div style='flex:1;text-align:center;padding:8px 12px;background:rgba(255,255,255,0.04);border-radius:8px;'>"
-        f"<div style='font-size:0.75rem;color:#90a4ae;margin-bottom:4px;'>RL Best 누적</div>"
+        f"<div style='font-size:0.75rem;color:#90a4ae;margin-bottom:4px;'>RL Best 누적 ({n_disp:,}대)</div>"
         f"<div style='font-size:1.35rem;font-weight:600;color:#b0bec5;'>{best_kwh:,.1f} kWh</div>"
         f"</div>"
         f"<div style='flex:2;text-align:center;padding:10px 16px;background:rgba(255,255,255,0.04);border-radius:8px;'>"
         f"<div style='font-size:0.78rem;color:#90a4ae;margin-bottom:4px;letter-spacing:.04em;text-transform:uppercase;'>{box_lbl}</div>"
-        f"<div style='font-size:2.0rem;font-weight:900;color:{accent};line-height:1.1;'>{save_best_krw:+,.0f}원</div>"
-        f"<div style='font-size:0.85rem;color:#90a4ae;margin-top:3px;'>{save_best_kwh:+,.1f} kWh · {diff_pct:+.1f}%</div>"
+        f"<div style='font-size:2.0rem;font-weight:900;color:{accent};line-height:1.1;'>{save_krw_scaled:+,.0f}원</div>"
+        f"<div style='font-size:0.85rem;color:#90a4ae;margin-top:3px;'>{save_kwh_scaled:+,.1f} kWh · {diff_pct:+.1f}%</div>"
         f"</div>"
         f"</div>",
         unsafe_allow_html=True,
@@ -369,11 +374,13 @@ def playback_fragment():
         ss.ab_running = False
         best_pct  = summary["best_savings_pct"]
         best_viol = summary["best_violations"]
+        end_krw   = summary["best_savings_krw"] * scale
+        end_co2   = summary["best_savings_co2"] * scale
         st.success(
             f"**시뮬레이션 종료** — "
             f"RL Best **{best_pct:+.1f} %** 절감 (위반 {best_viol} 회). "
-            f"누적 절감액 {summary['best_savings_krw']:+,.0f} 원 · "
-            f"CO₂ {summary['best_savings_co2']:+,.1f} kg",
+            f"누적 절감액 {end_krw:+,.0f} 원 · "
+            f"CO₂ {end_co2:+,.1f} kg  *(서버 {n_disp:,}대 기준)*",
             icon=":material/celebration:",
         )
 
