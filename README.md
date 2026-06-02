@@ -1,142 +1,185 @@
-## 개발환경 구성
+# AI Green IDC - 데이터센터 냉각 시스템 최적화
 
-1. **저장소 클론 및 폴더 이동**
-   ```bash
-   git clone <레포지토리_URL>
-   cd AI-Green-IDC
-   ```
+## 1. 프로젝트 개요
 
-2. **환경변수 파일 생성 및 설정**
-   ```bash
-   cp .env.example .env
-   ```
-   > `.env` 파일을 열어 `KMA_API_KEY` 등 각자의 로컬 환경에 맞는 값을 기입합니다.
+본 프로젝트는 데이터센터 냉각의 에너지 효율을 최적화하는 **강화학습 기반 통합 제어 시스템**이다. LightGBM으로 IT 부하와 냉각 수요를 예측하고, 자체 구축한 열역학 시뮬레이션 환경 위에서 SAC 에이전트가 CRAH 공급 온도를 동적으로 제어해 PUE를 절감한다.
 
-3. **가상환경 생성 및 패키지 설치 (`uv` 사용)**
-   ```bash
-   uv venv
-   source .venv/bin/activate  # Windows의 경우: .venv\Scripts\activate
-   uv sync
-   ```
+> **실험 결과**: Rule-based 대비 **PUE 7.8% 절감 (1.1894 → 1.1747)** · 온도 위반율 **0%** · IT 부하 예측 MAPE **0.50%** · 폭염 48시간 시나리오 검증 완료
 
+## 목차
 
-## docker 실행
+- [1. 프로젝트 개요](#1-프로젝트-개요)
+- [2. 시연 영상 (YouTube)](#2-시연-영상-youtube)
+- [3. 대시보드 미리보기](#3-대시보드-미리보기)
+- [4. 팀 소개](#4-팀-소개)
+- [5. 프로젝트 실행](#5-프로젝트-실행)
+- [6. 프로젝트 상세 내용](#6-프로젝트-상세-내용)
+- [7. 데이터 출처](#7-데이터-출처)
 
-### simulation-service 실행 (sinergym)
-```
-docker compose up --build simulation-service
-```
+## 2. 시연 영상 (YouTube)
 
-테스트를 위해 `docker-compose.yml`에서 `app/simulation_service/test_sinergym.py`를 실행하도록 설정해 둠.
+[![AI Green IDC 시연 영상](https://img.youtube.com/vi/NLvnjkAnINI/maxresdefault.jpg)](https://youtu.be/NLvnjkAnINI)
 
-### 그 외 실행
+> - 사이드바·페이지 구성 소개
+> - 사이드바 조작에 따른 실시간 KPI 반응
+> - LightGBM 24시간 예측 + 3D 데이터센터 뷰
+> - RL Best vs Rule-based 폭염 시나리오 라이브 비교
+> - ROI 계산기 및 기대 효과 환산
 
-```
-// 전체 실행
-docker compose up --build 
+## 3. 대시보드 미리보기
 
-// 백그라운드 실행
-docker compose up -d --build
+| 페이지 | 설명 | 스크린샷 |
+|---|---|---|
+| **0_대시보드** | 종합 KPI · PUE 게이지 · 전력 추이 · 벤치마크 | ![](docs/screenshots/0_dashboard.png) |
+| **1_운영_관리** | 냉각 모드 제어 · Rule/RL 제어 추천 · 위기 시나리오 분석 | ![](docs/screenshots/1_operations.png) |
+| **2_ESG_지표** | 탄소 배출 · 전력 비용 · CUE · ROI 계산기 | ![](docs/screenshots/2_esg.png) |
+| **3_분석_도구** | LightGBM 24h 예측 + 90% PI · 3D 데이터센터 뷰 | ![](docs/screenshots/3_analytics_forecast.png) ![](docs/screenshots/3_analytics_3d.png) |
+| **4_RL_vs_Rulebased** | RL Best와 Rule-based 라이브 비교 · 누적 절감 카운터 | ![](docs/screenshots/4_rl_vs_rule_chart.png) ![](docs/screenshots/4_rl_vs_rule_summary.png) |
 
-// 종료
-docker compose down
+<!-- TODO: docs/screenshots/ 디렉토리에 위 파일명으로 PNG 추가 (권장 해상도 1920×1080) -->
 
-// 로그 확인
-docker compose logs -f api
-docker compose logs -f forecast-service
-docker compose logs -f control-service
-docker compose logs -f simulation-service
-docker compose logs -f dashboard
-```
+## 4. 팀 소개
 
-## 로컬환경에서 서비스 실행
+팀명: 짱돌
 
-API Gateway
-```
-uv run uvicorn apps.api.main:app --reload --host 0.0.0.0 --port 8000
-```
+| **팀원** | **학번** | **담당 역할** |
+| --- | --- | --- |
+| **김효림 (팀장)** | 20221549 | • 제어 스키마 설계 및 Control Service 구축<br>• 커스텀 RL 환경 구현<br>• PPO/SAC 학습 파이프라인 구현<br>• 베이스라인 평가 프레임워크 구축<br>• RL 학습 전반 총괄 |
+| **심하연** | 20221573 | • MSA 설계 및 Docker 환경 구성<br>• Streamlit 대시보드 프론트엔드 구현 및 API 연동<br>• RL 학습<br>• 커스텀 보상 함수 보완 |
+| **김다은** | 20231515 | • Forecast Service 스키마 설계 및 구축<br>• LightGBM 기반 IT 부하·냉각 수요 예측 모델 구현<br>• RL 학습 |
+| **김성현** | 20201564 | • 열역학 모델 구현 및 검증<br>• PID 시뮬레이터 구현<br>• 데이터 물리학적 검증<br>• RL 학습 |
+| **심서연** | 20221571 | • 데이터 수집 및 전처리<br>• 데이터 파이프라인 구축 및 파생변수<br>• 모델 비교용 이동평균 예측 모델 구현<br>• RL 학습 |
 
-Forecast Service
-```
-uv run --extra forecast uvicorn apps.forecast_service.main:app --reload --host 0.0.0.0 --port 8001
-```
+## 5. 프로젝트 실행
 
-Control Service
-```
-uv run --extra control uvicorn apps.control_service.main:app --reload --host 0.0.0.0 --port 8002
-```
+```bash
+# 가상환경 생성 및 패키지 설치
+Green-IDC-Optimizer$ uv venv
+Green-IDC-Optimizer$ source .venv/bin/activate
+Green-IDC-Optimizer$ uv sync
 
-Simulation Service
-```
-uv run uvicorn apps.simulation_service.main:app --reload --host 0.0.0.0 --port 8003
+# 전체 실행
+Green-IDC-Optimizer$ docker compose up --build
+# 백그라운드 전체 실행
+Green-IDC-Optimizer$ docker compose up -d --build
+# 전체 종료
+Green-IDC-Optimizer$ docker compose down
 ```
 
-Dashboard
-```
-uv run --extra dashboard streamlit run apps/dashboard/app.py --server.port 8
-```
+### 서비스 포트
 
-## 프로젝트 폴더 구성
+실행 후 다음 포트로 접속:
 
-apps = 실행 단위
-core = 공용 코드
-domain = 핵심 문제 해결 로직
-data = 입출력 자산
-docs = 설명서
-tests = 검증 코드
+| 포트 | 서비스 | 비고 |
+|---|---|---|
+| **8501** | Streamlit Dashboard | 메인 진입점 — http://localhost:8501 |
+| **8000** | API Gateway | 라우팅 |
+| **8001** | Forecast Service | LightGBM 예측 |
+| **8002** | Control Service | SAC / Rule-based 제어 |
+| **8003** | Simulation Service | 열역학 모델 |
 
+→ 자세한 내용은 [docs/RUNBOOK.md](docs/RUNBOOK.md) 파일 참고
 
-```
-AI-Green-IDC/                           # 프로젝트 루트 디렉토리. 전체 소스, 데이터, 문서, 실행 설정을 포함하는 최상위 폴더
-├─ apps/                                # 실제 실행 가능한 애플리케이션 계층 모음. 각 서비스는 독립 프로세스/컨테이너로 실행 가능
-│  ├─ api/                              # 외부에서 가장 먼저 진입하는 통합 API 게이트웨이(FastAPI). 요청을 받아 내부 서비스로 전달
-│  ├─ forecast_service/                 # 부하 예측 및 냉각 수요 예측 서비스. ML/DL 모델 추론 API 제공
-│  ├─ control_service/                  # 제어 서비스. Rule-based, PID, RL, 향후 MPC 등의 제어 로직을 API 형태로 제공
-│  ├─ simulation_service/               # 시뮬레이션 서비스. 열역학 계산, PUE 계산, 운영 시나리오 평가 등을 수행
-│  └─ dashboard/                        # Streamlit 기반 사용자 대시보드. 운영 현황, 예측 결과, 제어 결과를 시각화
-│
-├─ core/                                # 여러 서비스에서 공통으로 사용하는 핵심 공용 모듈 모음
-│  ├─ config/                           # 환경변수, 설정값, 상수 정의. 예: API URL, 포트, 모델 경로, 기준 온도 범위
-│  ├─ schemas/                          # Pydantic 기반 데이터 스키마. 요청/응답 형식, 검증 규칙, 직렬화 구조 정의
-│  ├─ clients/                          # 서비스 간 REST 호출용 클라이언트 코드. 예: api→forecast_service 호출 래퍼
-│  └─ utils/                            # 범용 유틸리티 함수 모음. 날짜 처리, 로깅, 파일 입출력, 공통 계산 함수 등
-│
-├─ domain/                              # 비즈니스 로직/문제 해결 로직이 위치하는 핵심 도메인 계층
-│  ├─ data_pipeline/                    # 데이터 수집·정제·가공 파이프라인 관련 모듈
-│  │  ├─ google_trace/                  # Google Cluster Trace 데이터 수집/파싱/전처리 로직
-│  │  ├─ weather/                       # 기상청 API 또는 기상 데이터 수집/정제 로직
-│  │  └─ feature_engineering/           # 예측 모델 입력용 feature 생성 로직. lag, rolling, 시간 파생변수 등 생성
-│  ├─ thermodynamics/                   # 데이터센터 냉각 및 전력 계산을 위한 열역학 모델 구현 모듈
-│  │  ├─ it_power.py                    # IT 장비(서버/랙) 전력 사용량 계산 로직
-│  │  ├─ cooling_load.py                # 냉각 부하(Q) 계산 로직. 유량, 비열, 온도차 기반 계산 등 담당
-│  │  ├─ chiller.py                     # 칠러 소비전력 및 COP 계산 로직
-│  │  ├─ free_cooling.py                # 외기 조건 기반 Free Cooling 가능 여부 및 절감 효과 계산 로직
-│  │  └─ pue.py                         # PUE 계산 로직. 총 전력 대비 IT 전력 비율 산출
-│  ├─ forecasting/                      # 예측 모델 정의 및 학습/추론 관련 도메인 로직
-│  │  ├─ lgbm_model.py                  # LightGBM 기반 예측 모델 구현 파일
-│  │  ├─ lstm_model.py                  # LSTM 기반 시계열 예측 모델 구현 파일
-│  │  └─ intervals.py                   # 예측 구간(예: 90% Prediction Interval) 계산 로직
-│  ├─ controllers/                      # 제어 알고리즘 관련 핵심 로직 모음
-│  │  ├─ rule_based.py                  # 고정 규칙 기반 제어 로직. 임계치 조건에 따라 냉각 모드/설정값 결정
-│  │  ├─ pid.py                         # PID 제어기 구현. 목표 온도와 실제 온도 차이를 기반으로 연속 제어
-│  │  ├─ rl_env.py                      # 강화학습 환경 정의. 상태, 행동, 보상 함수, step/reset 로직 포함
-│  │  └─ rl_agent.py                    # 강화학습 에이전트 학습/추론 로직. PPO 등 RL 알고리즘 연동
-│  └─ esg/                              # ESG/탄소배출/에너지 절감 효과 분석 관련 로직
-│
-├─ data/                                # 프로젝트에서 사용하는 데이터 저장 공간
-│  ├─ raw/                              # 원본 데이터 저장 폴더. 수집 직후의 비가공 데이터 보관
-│  ├─ interim/                          # 1차 정제 또는 병합된 중간 데이터 저장 폴더
-│  ├─ processed/                        # 모델 학습/평가/추론에 바로 사용할 수 있도록 가공 완료된 데이터 저장 폴더
-│  └─ models/                           # 학습 완료된 모델 파일, scaler, tokenizer, 메타데이터 저장 폴더
-│
-├─ docs/                                # 프로젝트 문서화 자료 저장 폴더
-│  ├─ architecture.md                   # 전체 시스템 아키텍처 문서. 서비스 구성, 데이터 흐름, 배포 구조 설명
-│  ├─ thermodynamic_model.md            # 열역학 모델 수식, 가정, 변수 정의, 계산 방식 설명 문서
-│  └─ api_spec.md                       # REST API 명세 문서. 엔드포인트, 요청/응답 구조, 에러 코드 정의
-│
-├─ tests/                               # 단위 테스트, 통합 테스트, API 테스트 코드 저장 폴더
-├─ docker/                              # Docker 관련 설정 파일 저장 폴더. 각 서비스별 Dockerfile 또는 보조 스크립트 포함 가능
-├─ docker-compose.yml                   # 여러 컨테이너(api, forecast, control, dashboard 등)를 한 번에 띄우는 오케스트레이션 파일
-├─ .env.example                         # 환경변수 예시 파일. 실제 실행 시 필요한 키/설정값의 템플릿 제공
-└─ README.md                            # 프로젝트 소개, 실행 방법, 폴더 구조, 개발 가이드 등을 설명하는 메인 문서
-```
+## 6. 프로젝트 상세 내용
+
+![System Architecture.png](docs/system_architecture.png)
+
+### 6-1. 기술 스택
+
+#### **6-1-1. Backend / API**
+
+- Python 3.11 (uv 패키지 매니저)
+- FastAPI + Uvicorn - API Gateway, Forecast/Control/Simulation 서비스
+- Pydantic - 요청/응답 Schema
+
+#### **6-1-2. ML / AI**
+
+- **자체 IDCEnv (커스텀 Gymnasium 환경)** - 1차 ODE 기반 열역학 모델 + 5분 step 시뮬레이션 (Sinergym 비교 실험 후 학습 속도·커스터마이징 자유도를 위해 자체 구현 채택)
+- **LightGBM** - 주력 예측 모델, Quantile 회귀로 90% Prediction Interval 산출
+- **PyTorch** - LSTM 비교용 (선택적)
+- **Stable-Baselines3** - SAC 강화학습 에이전트
+- **Gymnasium** - RL 환경 인터페이스
+- **Scikit-learn** - 스케일러·전처리
+
+#### **6-1-3. Frontend / 시각화**
+
+- Streamlit - 대시보드
+- Plotly / Altair - 차트
+
+#### **6-1-4. 인프라**
+
+- Docker + Docker Compose - 마이크로서비스 컨테이너화
+- Pandas, Numpy - 데이터 전처리
+
+### 6-2. 프로젝트 상세
+
+#### 6-2-1. 열역학 기반 냉각 부하 모델
+
+**`domain/thermodynamics/`**
+
+- **SPECpower_ssj2008 기반 서버 전력 모델**: `P = P_idle + (P_max - P_idle) × cpu_util` (CPU서버: idle 200W / max 500W, GPU서버: idle 300W / max 1500W)
+- **냉각 부하 계산**: `Q = ṁ × cp × ΔT` 직접 구현
+- **칠러 COP 모델**: 외기온도 + 공급온도 + 부분부하율(PLR) 기반 비선형 효율 모델
+- **습구온도 기반 냉각 모드 자동 전환**: Free Cooling(습구 <10°C) / Hybrid(10~18°C) / Chiller(>18°C)
+- **PUE 계산**: 구글 데이터센터 PUE 1.10 벤치마크 기준
+
+#### 6-2-2. IT 부하 / 냉각 수요 예측
+
+**`domain/forecasting/`**
+
+- **LightGBM**: lag feature + rolling 통계 + 캘린더 특성, 24h/168h ahead 예측
+- 출력: 예측값 + **90% 신뢰구간**
+
+#### 6-2-3. RL 기반 냉각 제어
+
+**`domain/controllers/`**
+
+- **커스텀 IDC Gym 환경** (`idc_env.py`): 실측 Google Cluster Trace 2019 + 기상청 ASOS 데이터 기반 (365일 × 288스텝)
+- **관측 공간**: 9차원 (시간, 외기온도, 습도, CPU 사용률, 존 온도, 공급온도, IT전력, 습구온도 등)
+- **행동 공간**: 공급온도 설정값 [18, 25]°C
+- **알고리즘**: SAC (Soft Actor-Critic), PPO 비교 실험 후 채택 (Stable-Baselines3)
+- **도메인 랜덤화**: 학습 중 위기 시나리오 자동 주입 — 서버급증(CPU ×1.3) / 폭염(외기 +5~10°C) / 칠러 효율 저하
+- **2-tier 안전 시스템**: RL 추론 + 존 온도 26.5°C 초과 시 강제 냉각 fallback
+- **Rule-based 컨트롤러** + **PID 제어기** (Anti-windup, Incremental PID) 구현
+
+#### 6-2-4. 통합 관제 대시보드
+
+**`apps/dashboard/`**
+
+- **실시간 대시보드**: PUE 게이지, 온도, 전력 KPI
+- **운영 관리**: 파라미터 조작 → 24h 시뮬레이션 즉시 실행
+- **ESG 지표**: 탄소 배출량 (0.459 tCO₂/MWh), WUE, 에너지 비용
+- **분석 도구**: 예측 모델 성능 비교, feature importance
+- **RL vs Rule-based**: 두 제어 방식 PUE/온도 위반율 비교
+
+#### 6-2-5. 위기 시나리오 시뮬레이터
+
+- 상황 1 ) 서버 급증: IT 부하 +30%
+- 상황 2 ) 칠러 고장: 냉각 용량 50% 저하
+- 상황 3 ) 폭염: 외기 38°C 이상
+
+#### 6-2-6. 정량 성과
+
+| 지표 | 목표 | 달성 |
+|---|---|---|
+| IT 부하 예측 MAPE (24h) | 5% 이내 | **0.50%** |
+| 냉각 수요 예측 MAPE (24h) | 5% 이내 | **3.91%** |
+| 90% PI Coverage (IT / 냉각) | 85% 이상 | **90.10% / 94.41%** |
+| PUE 개선율 (Rule-based 대비) | best-effort | **7.8%** (1.1894 → 1.1747) |
+| RL 온도 위반율 | best-effort | **0%** |
+| 위기 시나리오 27°C 이하 유지 | — | 달성 |
+
+## 7. 데이터 출처
+
+본 프로젝트는 다음 공개 데이터셋을 기반으로 합성 1년치 시뮬 데이터를 구축했습니다.
+
+| 데이터 | 출처 | 활용 |
+|---|---|---|
+| **Google Cluster Trace 2019** | [google/cluster-data](https://github.com/google/cluster-data) | CPU 사용률 패턴 (시간별 부하 일주기) |
+| **기상청 ASOS** | [data.kma.go.kr](https://data.kma.go.kr/) | 외기 dry-bulb 온도, 상대습도, 풍속 |
+| **SPECpower_ssj2008** | [spec.org/power_ssj2008](https://www.spec.org/power_ssj2008/) | 서버 전력 모델 (idle / max 전력) |
+| **한전 산업용 전기요금** | 한국전력공사 산업용(갑) 평균 | 120원/kWh (ESG·ROI 계산용) |
+| **한국 전력 탄소 배출계수** | 환경부 온실가스 배출계수 | 0.459 kgCO₂/kWh |
+| **NAVER 각 춘천 PUE** | 공개 보도자료 | 1.09 (효율 벤치마크) |
+
+> 합성 데이터셋(`data/weather/synthetic_idc_1year_noisy.parquet`)은 위 출처를 조합·재가공한 결과이며, 1년치 5분 간격(105,120 step) 데이터로 RL 학습·예측 모델 학습·시뮬에 동일하게 사용.

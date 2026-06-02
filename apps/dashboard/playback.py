@@ -1,0 +1,366 @@
+"""AI vs 규칙 비교 — 시나리오 프리셋 + A/B 시뮬레이션 헬퍼.
+
+같은 외기/IT부하 시계열에서 두 컨트롤러(Rule-based, RL)를 동시에 돌려서
+타임랩스 재생용 DataFrame을 생성한다.
+"""
+
+from __future__ import annotations
+
+import pickle
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from core.config.constants import (
+    CARBON_FACTOR_KG_PER_KWH,
+    ELECTRICITY_COST_KRW_PER_KWH,
+)
+from domain.controllers.idc_env import IDCEnv, EPISODE_STEPS
+from domain.controllers.rule_based import calculate_setpoint, decide_cooling_mode
+
+# 5분 간격, 288 step = 1일
+STEPS_PER_DAY = EPISODE_STEPS
+PARQUET_PATH = Path(__file__).resolve().parents[2] / "data" / "weather" / "synthetic_idc_1year_noisy.parquet"
+
+# 디스크 캐시: 시나리오별 시뮬레이션 결과를 pickle로 보관 → 컨테이너 재시작에도 유지
+# 시나리오 fingerprint(start_idx, n_steps, cpu_boost, outdoor_offset_c)가 바뀌면 자동 재계산
+# 코드/모델 변경 시 강제 무효화하려면 CACHE_VERSION 숫자만 올리면 됨
+CACHE_VERSION = "v5"
+CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "cache" / "playback"
+
+@dataclass(frozen=True)
+class ScenarioPreset:
+    key: str
+    label: str
+    description: str
+    season: str
+    start_idx: int
+    n_steps: int
+    cpu_boost: float = 1.0
+    outdoor_offset_c: float = 0.0
+
+
+def _season_mask(ts: pd.Series, months: list[int]) -> pd.Series:
+    return ts.dt.month.isin(months)
+
+
+def _find_extreme_in_season(
+    df: pd.DataFrame, col: str, mode: str, window_days: int, months: list[int],
+) -> int:
+    win = window_days * STEPS_PER_DAY
+    rolling = df[col].rolling(win).mean()
+    mask = _season_mask(df["timestamp"], months)
+    candidates = rolling.where(mask)
+    end_idx = int(candidates.idxmax() if mode == "max" else candidates.idxmin())
+    return max(0, end_idx - win + 1)
+
+
+@lru_cache(maxsize=1)
+def list_scenarios() -> list[ScenarioPreset]:
+    """대표 구간(2일/1일) 시뮬 프리셋 생성. 프로세스 내 최초 1회만 parquet 탐색."""
+    df = pd.read_parquet(PARQUET_PATH, columns=["timestamp", "outside_temp_c", "cpu_utilization"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+    # ── 여름: 가장 더운 2일 (폭염)
+    summer_start = _find_extreme_in_season(df, "outside_temp_c", "max", 2, [6, 7, 8])
+
+    # ── 가을: 외기 15°C 근처 1일 (환절기)
+    autumn_mask = _season_mask(df["timestamp"], [9, 10, 11])
+    autumn_roll = (df["outside_temp_c"].rolling(STEPS_PER_DAY).mean() - 15.0).abs()
+    autumn_end  = int(autumn_roll.where(autumn_mask).idxmin())
+    autumn_start = max(0, autumn_end - STEPS_PER_DAY + 1)
+
+    # ── 겨울: 가장 추운 2일 (혹한기)
+    winter_start = _find_extreme_in_season(df, "outside_temp_c", "min", 2, [12, 1, 2])
+
+    # ── IT 스파이크: cpu 가장 높은 1일
+    spike_end   = int(df["cpu_utilization"].rolling(STEPS_PER_DAY).mean().idxmax())
+    spike_start = max(0, spike_end - STEPS_PER_DAY + 1)
+
+    return [
+        ScenarioPreset(
+            key="summer", label="폭염",
+            description="6–8월 중 가장 더운 2일 대표 구간",
+            season="summer", start_idx=summer_start, n_steps=2 * STEPS_PER_DAY,
+        ),
+        ScenarioPreset(
+            key="autumn", label="환절기",
+            description="9–11월 외기 15°C 근처 1일 대표 구간",
+            season="autumn", start_idx=autumn_start, n_steps=STEPS_PER_DAY,
+        ),
+        ScenarioPreset(
+            key="winter", label="혹한기",
+            description="12–2월 중 가장 추운 2일 대표 구간",
+            season="winter", start_idx=winter_start, n_steps=2 * STEPS_PER_DAY,
+        ),
+        ScenarioPreset(
+            key="it_spike", label="IT 스파이크",
+            description="연중 CPU 부하가 가장 높은 1일 · 부하 부스트 ×1.2",
+            season="other", start_idx=spike_start, n_steps=STEPS_PER_DAY,
+            cpu_boost=1.2,
+        ),
+    ]
+
+
+def _rule_based_setpoint_local(obs: np.ndarray) -> float:
+    """fallback: control-service 불가 시 도메인 함수로 직접 계산."""
+    outdoor_temp = float(obs[1])
+    humidity = float(obs[3])
+    mode = decide_cooling_mode(outdoor_temp, humidity)
+    return calculate_setpoint(mode, outdoor_temp)
+
+
+def _obs_to_payload(obs: np.ndarray) -> dict:
+    """IDCEnv obs(9차원) → control_service payload 매핑.
+
+    obs 순서: [hour, outdoor_temp, outdoor_trend, humidity, cpu_util,
+              zone_temp, supply_temp, it_power, wet_bulb]
+    """
+    return {
+        "outdoor_temp_c":   float(obs[1]),
+        "it_power_kw":      max(float(obs[7]), 0.1),  # ControlRequest는 gt=0.0 강제
+        "outdoor_humidity": float(obs[3]),
+        "outdoor_temp_trend_c_per_s": float(obs[2]),
+        "zone_temp_c":      float(obs[5]),
+        "supply_setpoint_c": float(obs[6]),
+        "cpu_utilization":  float(obs[4]),
+    }
+
+
+def _make_rule_based_http_controller():
+    """control-service /control/rule-based 호출 wrapper. 실패 시 local fallback."""
+    from apps.dashboard.api_client import rule_based_control
+    failures = {"count": 0}
+
+    def controller(obs: np.ndarray) -> float:
+        if failures["count"] >= 3:
+            return _rule_based_setpoint_local(obs)  # 3회 실패 후 영구 fallback
+        p = _obs_to_payload(obs)
+        result = rule_based_control(
+            outdoor_temp_c=p["outdoor_temp_c"],
+            it_power_kw=p["it_power_kw"],
+            outdoor_humidity=p["outdoor_humidity"],
+        )
+        if "error" in result:
+            failures["count"] += 1
+            return _rule_based_setpoint_local(obs)
+        return float(result["supply_air_temp_setpoint_c"])
+    return controller
+
+
+def _make_rl_best_http_controller():
+    """control-service /control/rl 호출 wrapper (효율 우선 best 모델만 사용).
+
+    실패 시 local predict_best()로 fallback.
+    """
+    from apps.dashboard.api_client import rl_control
+    failures = {"count": 0}
+
+    def _local_predict(obs: np.ndarray) -> float:
+        from domain.controllers.rl_inference import predict_best
+        return float(predict_best(obs))
+
+    def controller(obs: np.ndarray) -> float:
+        if failures["count"] >= 3:
+            return _local_predict(obs)
+        p = _obs_to_payload(obs)
+        result = rl_control(
+            outdoor_temp_c=p["outdoor_temp_c"],
+            it_power_kw=p["it_power_kw"],
+            outdoor_humidity=p["outdoor_humidity"],
+            zone_temp_c=p["zone_temp_c"],
+            supply_setpoint_c=p["supply_setpoint_c"],
+            cpu_utilization=p["cpu_utilization"],
+            outdoor_temp_trend_c_per_s=p["outdoor_temp_trend_c_per_s"],
+        )
+        if "error" in result:
+            failures["count"] += 1
+            return _local_predict(obs)
+        return float(result["supply_air_temp_setpoint_c"])
+    return controller
+
+
+def _build_env(scenario: ScenarioPreset) -> IDCEnv:
+    """시나리오 시작 idx로 고정된 IDCEnv 인스턴스 생성."""
+    env = IDCEnv(max_episode_steps=scenario.n_steps)
+    env.reset(seed=42)
+    env._data_idx = scenario.start_idx
+    env._zone_temp = 25.0
+    env._outdoor_history.clear()
+
+    if scenario.cpu_boost != 1.0 or scenario.outdoor_offset_c != 0.0:
+        # 사본을 만들어 시나리오 변조 적용 (다른 IDCEnv 인스턴스에 영향 X)
+        env._data = env._data.copy()
+        end = scenario.start_idx + scenario.n_steps
+        if scenario.outdoor_offset_c != 0.0:
+            env._data[scenario.start_idx:end, 0] += scenario.outdoor_offset_c
+        if scenario.cpu_boost != 1.0:
+            env._data[scenario.start_idx:end, 2] = np.clip(
+                env._data[scenario.start_idx:end, 2] * scenario.cpu_boost, 0.0, 1.0
+            )
+    return env
+
+
+def _run_episode(env: IDCEnv, controller, n_steps: int) -> pd.DataFrame:
+    """주어진 env에서 controller(obs→setpoint)로 n_steps 시뮬레이션."""
+    obs = env._get_obs()
+    rows = []
+    for step in range(n_steps):
+        setpoint = controller(obs)
+        obs, _reward, _term, trunc, info = env.step(np.array([setpoint], dtype=np.float32))
+        # 5분 단위 step → kWh 환산 (전력 kW × 5/60 h)
+        total_power_kw = info["it_power_kw"] + info["cooling_power_kw"]
+        rows.append({
+            "step":            step,
+            "minute":          step * 5,
+            "외기온도":         float(obs[1]),
+            "습도":            float(obs[3]),
+            "CPU 사용률":       float(obs[4]) * 100.0,
+            "공급 온도":        float(obs[6]),
+            "서버실 온도":      info["zone_temp_c"],
+            "IT 전력":          info["it_power_kw"],
+            "냉각 전력":        info["cooling_power_kw"],
+            "총 전력":          total_power_kw,
+            "PUE":             info["pue"],
+            "냉각 모드":        info["cooling_mode"],
+            "온도 위반":        info["temp_violation"],
+            "누적 kWh":         total_power_kw * (5.0 / 60.0),
+        })
+        if trunc:
+            break
+
+    df = pd.DataFrame(rows)
+    df["누적 kWh"] = df["누적 kWh"].cumsum()
+    df["누적 원"] = df["누적 kWh"] * ELECTRICITY_COST_KRW_PER_KWH
+    df["누적 kgCO₂"] = df["누적 kWh"] * CARBON_FACTOR_KG_PER_KWH
+    return df
+
+
+def simulate_compare(scenario: ScenarioPreset) -> dict:
+    """시나리오에 대해 두 컨트롤러(Rule / RL Best)를 돌리고 결과를 반환.
+
+    - Rule-based: 외기 wet-bulb로 3단 setpoint 결정 (22/20/18°C)
+    - RL Best: sac-wetbulb-1m 단독, PUE 최적화 + safe fallback
+    """
+    rule_env = _build_env(scenario)
+    df_rule = _run_episode(rule_env, _make_rule_based_http_controller(), scenario.n_steps)
+
+    rl_loaded = False
+    df_best = None
+    try:
+        best_env = _build_env(scenario)
+        df_best = _run_episode(best_env, _make_rl_best_http_controller(), scenario.n_steps)
+        rl_loaded = True
+    except Exception as exc:
+        print(f"[playback] RL 시뮬레이션 실패 → rule-only 모드: {exc}")
+        df_best = df_rule.copy()
+
+    def _summary(df: pd.DataFrame, label: str) -> dict:
+        total = float(df["누적 kWh"].iloc[-1])
+        savings = float(df_rule["누적 kWh"].iloc[-1]) - total
+        pct = (savings / float(df_rule["누적 kWh"].iloc[-1]) * 100.0) if df_rule["누적 kWh"].iloc[-1] > 0 else 0.0
+        return {
+            f"{label}_total_kwh":   total,
+            f"{label}_savings_kwh": savings,
+            f"{label}_savings_pct": pct,
+            f"{label}_savings_krw": savings * ELECTRICITY_COST_KRW_PER_KWH,
+            f"{label}_savings_co2": savings * CARBON_FACTOR_KG_PER_KWH,
+            f"{label}_avg_pue":     float(df["PUE"].mean()),
+            f"{label}_violations":  int((df["온도 위반"] > 0).sum()),
+        }
+
+    summary: dict = {
+        "rule_total_kwh": float(df_rule["누적 kWh"].iloc[-1]),
+        "rule_avg_pue":   float(df_rule["PUE"].mean()),
+        "rule_violations": int((df_rule["온도 위반"] > 0).sum()),
+        "rl_loaded":      rl_loaded,
+    }
+    summary.update(_summary(df_best, "best"))
+
+    return {
+        "rule":     df_rule,
+        "best":     df_best,
+        "scenario": scenario,
+        "summary":  summary,
+    }
+
+
+# ── 디스크 캐시 래퍼 ────────────────────────────────────────────────────────
+
+def _disk_cache_path(scenario: ScenarioPreset) -> Path:
+    """시나리오 fingerprint 기반 캐시 파일 경로."""
+    fp = (
+        f"{CACHE_VERSION}_{scenario.key}"
+        f"_idx{scenario.start_idx}"
+        f"_n{scenario.n_steps}"
+        f"_cpu{scenario.cpu_boost}"
+        f"_temp{scenario.outdoor_offset_c}"
+    )
+    return CACHE_DIR / f"{fp}.pkl"
+
+
+def simulate_compare_cached(scenario: ScenarioPreset) -> dict:
+    """simulate_compare의 디스크 캐시 버전.
+
+    같은 시나리오 fingerprint면 컨테이너 재시작에도 즉시 로드.
+    모델/코드 변경 시 CACHE_VERSION을 올리거나 data/cache/playback/ 를 비운다.
+    """
+    cache_path = _disk_cache_path(scenario)
+    if cache_path.exists():
+        try:
+            with cache_path.open("rb") as f:
+                return pickle.load(f)
+        except Exception as exc:
+            print(f"[playback] 캐시 로드 실패 → 재계산: {exc}")
+
+    result = simulate_compare(scenario)
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with cache_path.open("wb") as f:
+            pickle.dump(result, f)
+    except Exception as exc:
+        print(f"[playback] 캐시 저장 실패 (계속 진행): {exc}")
+    return result
+
+
+# ── 규모별 도입 효과 환산 ──────────────────────────────────────────────────
+# 시뮬레이션은 서버 500대(SyntheticIDCBuilder 구성, data_pipeline.py:445)를
+# 기준으로 돌아간다. 의사결정자에게 "우리 규모면 연 얼마"를 보여주기 위해
+# 전 시나리오(폭염/한파/스파이크/환절기)의 RL Best 절감을 연환산·평균내
+# "서버 1대당 연간 절감 전력(kWh)" 계수를 만든다. 이 계수를 서버 대수에
+# 선형 곱하면 임의 규모의 연간 절감액/탄소를 추정할 수 있다.
+
+SIM_BASE_SERVERS = 500  # 시뮬레이션 기준 서버 대수
+
+
+def annual_savings_per_server_kwh() -> float:
+    """전 시나리오 RL Best 절감을 연환산·평균낸 '서버 1대당 연 절감 kWh'.
+
+    각 시나리오는 1~2일 구간이므로 365일로 환산한 뒤 시나리오 간 평균을 내
+    특정 극단 조건(폭염/한파)에 치우치지 않은 대표 절감률을 얻는다.
+    캐시(simulate_compare_cached)를 그대로 재사용하므로 추가 시뮬 비용은 없다.
+    """
+    per_server: list[float] = []
+    for sc in list_scenarios():
+        result = simulate_compare_cached(sc)
+        days = sc.n_steps / STEPS_PER_DAY
+        annual_kwh = result["summary"]["best_savings_kwh"] / days * 365.0
+        per_server.append(annual_kwh / SIM_BASE_SERVERS)
+    return sum(per_server) / len(per_server) if per_server else 0.0
+
+
+def scale_savings(num_servers: int) -> dict:
+    """주어진 서버 대수에서 RL 도입 시 연간 절감 효과를 추정해 반환."""
+    per_server_kwh = annual_savings_per_server_kwh()
+    annual_kwh = per_server_kwh * num_servers
+    annual_krw = annual_kwh * ELECTRICITY_COST_KRW_PER_KWH
+    annual_co2_kg = annual_kwh * CARBON_FACTOR_KG_PER_KWH
+    return {
+        "num_servers":  num_servers,
+        "annual_kwh":   annual_kwh,
+        "annual_krw":   annual_krw,
+        "annual_co2_t": annual_co2_kg / 1000.0,
+    }

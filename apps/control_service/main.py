@@ -1,34 +1,23 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from datetime import datetime
-from domain.controllers.rule_based import run_rule_based
+import numpy as np
+from fastapi import FastAPI, HTTPException
+
+from core.config.constants import WET_BULB_FREE_THRESHOLD_C, WET_BULB_HYBRID_THRESHOLD_C
+from core.config.enums import CoolingMode
+from core.schemas.control import ControlRequest, ControlResponse
+from domain.controllers.rule_based import decide_cooling_mode, run_rule_based
+from domain.thermodynamics.chiller import calculate_wet_bulb_c
 
 app = FastAPI(title="Control Service")
 
 """
-POST /control/rule-based    → Rule-based 제어 결과
-POST /control/mpc           → MPC 최적 설정값
-POST /control/rl            → RL 에이전트 결과
-POST /control/scenario      → 시나리오 주입
-GET  /control/status        → 현재 제어 상태
-GET  /esg/summary           → 탄소·WUE 요약
+POST /api/v1/control/optimize → 현재 최적 제어 결과 (rule_based, 추후 RL로 교체)
+POST /control/rule-based      → Rule-based 제어 결과
+POST /control/rl              → RL(SAC) 에이전트 결과
+POST /control/mpc             → MPC 최적 설정값 (선택)
+POST /control/scenario        → 위기 시나리오 주입
+GET  /control/status          → 현재 제어 상태
+GET  /esg/summary             → 탄소·WUE 요약
 """
-
-class ControlRequest(BaseModel):
-    outdoor_temp_c: float # 외기 온도, 냉각 모드 결정
-    outdoor_humidity_pct: float = 50.0 # 외기 습도, free cooling 효율 보정용
-    it_power_kw: float # 현재 IT 전력, 냉각 부하 계산용
-    timestamp: datetime | None = None # 시각 - RL에서 time_of_day 특성
-    #server_inlet_temp_c: float, 서버 입구 온도, PID가 현재 온도로 받아야 하는 값
-    #server_outlet_temp_c: float, 서버 출구 온도, 냉각 부하 계산시 온도 변화량 계산 
-
-class ControlResponse(BaseModel): # 대시 보드에 들어가야 하는 값
-    cooling_mode: str # 냉각 방식
-    supply_air_temp_setpoint_c: float # 공조기 목표 온도
-    free_cooling_ratio: float # ESG 지표 계산 
-    expected_pue: float = 1.35 # TODO: simulation_service 연동 후 교체, 예상 PUE
-    # chw_flow_setpoint_kg_s: float, 냉각수 유량, simulation_service 연동 시 추가
-
 
 @app.get("/health")
 def health() -> dict[str, str]:
@@ -38,7 +27,7 @@ def health() -> dict[str, str]:
 def optimize(req: ControlRequest) -> ControlResponse:
     result = run_rule_based(
         outdoor_temp_c=req.outdoor_temp_c,
-        outdoor_humidity_pct=req.outdoor_humidity_pct,
+        outdoor_humidity =req.outdoor_humidity,
         it_power_kw=req.it_power_kw,
     )
     return ControlResponse(
@@ -51,7 +40,7 @@ def optimize(req: ControlRequest) -> ControlResponse:
 def rule_based(req: ControlRequest) -> ControlResponse:
     result = run_rule_based(
         outdoor_temp_c = req.outdoor_temp_c,
-        outdoor_humidity_pct = req.outdoor_humidity_pct,
+        outdoor_humidity = req.outdoor_humidity,
         it_power_kw= req.it_power_kw
     )
     return ControlResponse(
@@ -61,11 +50,73 @@ def rule_based(req: ControlRequest) -> ControlResponse:
     )
 
 
+def _build_obs(req: ControlRequest) -> np.ndarray:
+    """ControlRequest → IDCEnv 9-dim obs 변환. RL 필수 필드 누락 시 422 raise."""
+    missing = [k for k, v in {
+        "zone_temp_c": req.zone_temp_c,
+        "supply_setpoint_c": req.supply_setpoint_c,
+        "cpu_utilization": req.cpu_utilization,
+    }.items() if v is None]
+    if missing:
+        raise HTTPException(status_code=422, detail=f"RL 추론에 필요한 필드 누락: {missing}")
+
+    from domain.thermodynamics.chiller import calculate_wet_bulb_c
+    hour = req.timestamp.hour if req.timestamp else 12
+    wet_bulb = calculate_wet_bulb_c(req.outdoor_temp_c, req.outdoor_humidity)
+    # obs 순서: IDCEnv._get_obs()와 동일
+    # [hour, outdoor_temp, outdoor_trend, humidity, cpu_util, zone_temp, supply_temp, it_power, wet_bulb]
+    return np.array([
+        hour,
+        req.outdoor_temp_c,
+        req.outdoor_temp_trend_c_per_s,
+        req.outdoor_humidity,
+        req.cpu_utilization,
+        req.zone_temp_c,
+        req.supply_setpoint_c,
+        req.it_power_kw,
+        wet_bulb,
+    ], dtype=np.float32)
+
+
+def _derive_cooling_metadata(
+    outdoor_temp_c: float,
+    outdoor_humidity_pct: float,
+) -> tuple[CoolingMode, float]:
+    """외기 + 습도 기반 cooling_mode + free_cooling_ratio 계산 (wet-bulb 기준).
+
+    rule_based / chiller / free_cooling 모듈과 환경 일관성 유지.
+    """
+    cooling_mode = decide_cooling_mode(outdoor_temp_c, outdoor_humidity_pct)
+    if cooling_mode == CoolingMode.FREE_COOLING:
+        ratio = 1.0
+    elif cooling_mode == CoolingMode.HYBRID:
+        wet_bulb = calculate_wet_bulb_c(outdoor_temp_c, outdoor_humidity_pct)
+        ratio = 1.0 - (wet_bulb - WET_BULB_FREE_THRESHOLD_C) / (
+            WET_BULB_HYBRID_THRESHOLD_C - WET_BULB_FREE_THRESHOLD_C
+        )
+    else:
+        ratio = 0.0
+    return cooling_mode, ratio
+
+
 @app.post("/control/rl")
 def rl_control(req: ControlRequest) -> ControlResponse:
-    # TODO: Week 4 RL 에이전트 연동, 임의값 넣어 둠
+    """효율 우선 best 모델로 supply setpoint 추론 (PUE 최우수).
+
+    safe fallback 자동 적용 (zone > 26.5°C 시 T_SUPPLY_MIN 강제).
+    """
+    obs = _build_obs(req)
+    try:
+        from domain.controllers.rl_inference import predict_best
+        setpoint = predict_best(obs)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=f"RL 모델 로드 실패: {e}")
+
+    cooling_mode, ratio = _derive_cooling_metadata(req.outdoor_temp_c, req.outdoor_humidity)
     return ControlResponse(
-        cooling_mode = "hybrid",
-        supply_air_temp_setpoint_c=20.0,
-        free_cooling_ratio=0.5
+        cooling_mode=cooling_mode.value,
+        supply_air_temp_setpoint_c=setpoint,
+        free_cooling_ratio=ratio,
     )
+
+

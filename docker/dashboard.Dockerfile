@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -12,4 +12,4 @@ RUN uv sync --frozen --no-dev --extra dashboard
 
 COPY . /app
 
-CMD ["uv", "run", "--extra", "dashboard", "streamlit", "run", "apps/dashboard/app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
+CMD ["uv", "run", "--frozen", "--no-dev", "--extra", "dashboard", "streamlit", "run", "apps/dashboard/app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]

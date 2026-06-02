@@ -1,3 +1,4 @@
+.lock
 .venv/
 __pycache__/
 *.pyc
@@ -6,17 +7,25 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
-
+.lock
+CLAUDE.md
+프로젝트 명세서.pdf
 .env
-
+명세서3.md
 data/raw/
 data/interim/
 data/processed/
 data/models/
+data/cache/
+data/eval/
 
 .DS_Store
 .idea/
 .vscode/
 
-# sinergym 
-Eplus-datacenter_dx-mixed-continuous-stochastic-v1-*
+# sinergym 시뮬레이션 출력
+Eplus-*/
+data/eplus-output/
+
+# 강화학습 로그
+logs/

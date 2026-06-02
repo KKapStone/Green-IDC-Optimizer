@@ -1,0 +1,103 @@
+
+# 냉각 모드 전환 온도 기준 (°C) — 명세서 기준 (외기 dry-bulb)
+FREE_COOLING_THRESHOLD_C = 15.0   # 이하: 완전 자연공조
+HYBRID_THRESHOLD_C = 22.0         # 이하: 혼합 모드
+
+# 습구 온도 기반 냉각 모드 (출처: ASHRAE TC 9.9 권장 자유공조 wet-bulb 5~10°C)
+# 자유공조 활용 시 잠열 부하 고려 필요 → wet-bulb 기준이 dry-bulb보다 적합
+WET_BULB_FREE_THRESHOLD_C = 10.0   # 이하: 완전 자연공조 (DOE FEMP: 자유공조 fraction 30~50% 권장)
+WET_BULB_HYBRID_THRESHOLD_C = 18.0 # 이하: 혼합 모드
+
+# 칠러 부분부하 효율 모델 (출처: ASHRAE 90.4 + 일반 centrifugal chiller 효율 곡선)
+# 실제 칠러는 부분부하에서 최고 효율, 풀로드/저부하에서 효율 저하 (참조: Trane Engineers Newsletter Vol 41-3)
+CHILLER_MAX_CAPACITY_KW = 250.0   # 설계 최대 냉각 용량 (kW) — IT 풀로드 230kW + 마진
+CHILLER_OPTIMAL_PLR = 0.6         # 최적 효율 PLR (산업 일반: 50~70%, 중앙값 채택)
+CHILLER_PLR_PENALTY = 0.3         # PLR 이탈 시 효율 감소 강도 (실측 곡선 fit, ±30% 변동 가능)
+
+# 팬 전력 비율 (냉각 부하 대비, ASHRAE TC 9.9 참조)
+FAN_POWER_RATIO_FREE = 0.035      # 자연공조 시 팬 전력 (3.5%)
+FAN_POWER_RATIO_CHILLER = 0.08    # 기계식 냉방 시 팬 전력 (8%)
+
+# 팬 전력 모델 (Affinity Law: P_fan ∝ m_air³) — IDCEnv용 가변 풍량 모델
+FAN_POWER_DESIGN_KW = 18.5        # 설계 풍량에서 정격 팬 전력 (kW) — 232kW × 0.08 ≈ 18.5
+M_AIR_MAX_KG_S = 66.0             # CRAH 최대 풍량 (설계의 2배) — 풍량 상한
+MIN_DELTA_T_C = 1.0               # 풍량 역산 분모 보호 (°C) — supply ≥ return 비현실 케이스 방지
+FAN_AFFINITY_EXP = 2.0            # 팬 전력 affinity law 지수 — VFD 산업 표준 (이론 3, 실측 1.8~2.5)
+
+# 냉각 부하 설계 파라미터 (SyntheticIDCBuilder 기준, p.15-16)
+T_SUPPLY_DESIGN_C = 20.0          # CRAH 공급 온도 설계값 (°C)
+T_RETURN_DESIGN_C = 27.0          # 환기 온도 설계값 (°C)
+M_AIR_DESIGN_KG_S = 33.0          # 설계 공기 유량 (kg/s) — CRAH 3대 정상 운영 기준 (4대×11 kg/s 중 3대 가동)
+NUM_SERVERS_DESIGN = 400           # 설계 기준 서버 수
+
+# 서버 전력 스펙 (SPECpower_ssj2008 기준)
+CPU_SERVER_P_IDLE_W = 200.0        # CPU 서버 유휴 전력 (W, Intel Xeon 기준)
+CPU_SERVER_P_MAX_W = 500.0         # CPU 서버 최대 전력 (W)
+GPU_SERVER_P_IDLE_W = 300.0        # GPU 서버 유휴 전력 (W, NVIDIA A100 × 4 기준)
+GPU_SERVER_P_MAX_W = 1500.0        # GPU 서버 최대 전력 (W)
+
+# ESG 계수 나중에 쓴다면 ..
+# TODO(업데이트 필요): 한국에너지공단(KEA) 연도별 전력 배출계수 갱신 시 수정 — 현재 2023년 기준 0.459 tCO₂/MWh
+CARBON_FACTOR_TCO2_PER_MWH   = 0.459   # 한국 전력 탄소 배출계수
+# 동일 계수의 kgCO₂/kWh 표현 (tCO₂/MWh와 수치 동일: 1tCO₂/MWh = 1kgCO₂/kWh)
+CARBON_FACTOR_KG_PER_KWH     = CARBON_FACTOR_TCO2_PER_MWH
+# TODO(업데이트 필요): 산업용 전기요금 변경 시 수정 — 현재 120원/kWh (한전 산업용 갑 기준 임시값)
+ELECTRICITY_COST_KRW_PER_KWH = 120.0   # 산업용 전기요금 (원/kWh)
+
+# 위기 시나리오 정의 (명세서 기준)
+CRISIS_CONFIGS: dict = {
+    None: {
+        "label":           "정상",
+        "util_multiplier":    1.0,
+        "outdoor_override":   None,
+        "chiller_ratio":      1.0,
+    },
+    "server_surge": {
+        "label":           "서버 급증 (+30%)",
+        "util_multiplier":    1.3,
+        "outdoor_override":   None,
+        "chiller_ratio":      1.0,
+    },
+    "chiller_failure": {
+        "label":           "냉각기 고장 (칠러 1대 탈락)",
+        "util_multiplier":    1.0,
+        "outdoor_override":   None,
+        "chiller_ratio":      0.5,
+    },
+    "heat_wave": {
+        "label":           "폭염 (외기 38°C+)",
+        "util_multiplier":    1.0,
+        "outdoor_override":   38.0,
+        "chiller_ratio":      1.0,
+    },
+}
+
+CRISIS_STRATEGIES: dict[str, str] = {
+    "server_surge":    "칠러 추가 가동 + 공급 온도 1도 하향",
+    "chiller_failure": "IT 부하 분산 요청 + Free Cooling 최대화",
+    "heat_wave":       "칠러 전력 증가 + 공급 온도 최저화 (16°C)",
+}
+
+SCENARIO_TEMP_PROFILES: dict[str, dict] = {
+    "여름 (Summer)":    {"base": 30.0, "amplitude": 6.0},
+    "봄/가을 (Spring/Fall)": {"base": 15.0, "amplitude": 8.0},
+    "겨울 (Winter)":    {"base": 2.0,  "amplitude": 6.0},
+}
+
+# 시간대별 워크로드 비율 (00~23시)
+WORKLOAD_PROFILE: list[float] = [
+    0.35, 0.30, 0.28, 0.27, 0.28, 0.32,   # 00~05: 야간 저부하
+    0.45, 0.60, 0.75, 0.85, 0.90, 0.92,   # 06~11: 오전 증가
+    0.90, 0.88, 0.92, 0.93, 0.88, 0.82,   # 12~17: 주간 피크
+    0.72, 0.65, 0.58, 0.50, 0.42, 0.38,   # 18~23: 야간 감소
+]
+
+# PUE 벤치마크 (참고용) — NAVER 각 춘천 1.09가 목표 기준
+PUE_BENCHMARK = {
+    "naver_chuncheon": 1.09,    # NAVER 각 춘천 (세계 최고 수준)
+    "google_global": 1.10,      # Google 글로벌 평균 (2023)
+    "global_average": 1.58,     # 글로벌 평균
+    "korea_private": 2.03,      # 국내 민간 평균
+    "korea_public": 3.13,       # 국내 공공기관 평균
+    "green_dc_standard": 1.66,  # 그린데이터센터 인증 기준
+}

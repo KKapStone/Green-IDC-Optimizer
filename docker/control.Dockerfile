@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -12,4 +12,4 @@ RUN uv sync --frozen --no-dev --extra control
 
 COPY . /app
 
-CMD ["uv", "run", "--extra", "control", "uvicorn", "apps.control_service.main:app", "--host", "0.0.0.0", "--port", "8002"]
+CMD ["uv", "run", "--frozen", "--no-dev", "--extra", "control", "uvicorn", "apps.control_service.main:app", "--host", "0.0.0.0", "--port", "8002"]
