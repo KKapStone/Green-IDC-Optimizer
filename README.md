@@ -15,6 +15,7 @@
 - [5. 프로젝트 실행](#5-프로젝트-실행)
 - [6. 프로젝트 상세 내용](#6-프로젝트-상세-내용)
 - [7. 데이터 출처](#7-데이터-출처)
+- [8. 문서](#8-문서)
 
 ## 2. 시연 영상 (YouTube)
 
@@ -183,3 +184,17 @@ Green-IDC-Optimizer$ docker compose down
 | **NAVER 각 춘천 PUE** | 공개 보도자료 | 1.09 (효율 벤치마크) |
 
 > 합성 데이터셋(`data/weather/synthetic_idc_1year_noisy.parquet`)은 위 출처를 조합·재가공한 결과이며, 1년치 5분 간격(105,120 step) 데이터로 RL 학습·예측 모델 학습·시뮬에 동일하게 사용.
+
+## 8. 문서
+
+| 문서 | 설명 |
+|---|---|
+| [RUNBOOK](docs/RUNBOOK.md) | 개발 환경 설정 및 실행 가이드 |
+| [시스템 아키텍처](docs/architecture.md) | MSA 5서비스 구성, 포트, 서비스 간 통신 |
+| [API 명세서](docs/api_spec.md) | REST 엔드포인트 요청/응답 스키마 |
+| [열역학 냉각 부하 모델](docs/thermodynamic_model.md) | 물리 기반 냉각 공식, PUE, ESG 지표 |
+| [제어 방식 성능 비교](docs/controller_comparison.md) | Rule-based / PID / RL(SAC) 평가 결과 |
+| [PID 튜닝 과정](docs/pid_tuning.md) | ODE 시뮬레이터 기반 PID 파라미터 도출 |
+| [대시보드 설계](docs/dashboard_design.md) | Streamlit UI/UX 명세 |
+| [KCC2026 등재 논문 자료](docs/papers/KCC2026_RL을활용한데이터센터냉각에너지효율개선방안연구.pdf) | RL 기반 데이터센터 냉각 효율화 연구 |
+| [서강대 26-1 캡스톤디자인 최종 발표 자료](docs/papers/서강대캡스톤디자인2026_최종발표자료.pdf) | 캡스톤디자인 최종 발표 슬라이드 |
